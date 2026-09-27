@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.lingmart</groupId>
+        <artifactId>lingmart</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>lingmart-common</artifactId>
+    <name>lingmart-common</name>
+    <description>轻营 · 通用公共模块：统一返回 R、全局异常处理、JWT 工具、常量</description>
+
+    <dependencies>
+        <!-- 仅引入 spring-web 注解（@RestControllerAdvice 等），不引入 starter-web，
+             避免把 Servlet 全家桶传染给 gateway（WebFlux 服务） -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-web</artifactId>
+        </dependency>
+        <!-- 提供 org.springframework.validation.BindException（MethodArgumentNotValidException 的父类） -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-context</artifactId>
+        </dependency>
+        <!-- 全局异常处理器引用 HttpRequestMethodNotSupportedException（继承 jakarta.servlet.ServletException），
+             编译期需要 servlet-api；provided 作用域不向消费方传播（gateway 是 WebFlux 不应引入 Servlet），
+             各业务服务经 spring-boot-starter-web 自带 -->
+        <dependency>
+            <groupId>jakarta.servlet</groupId>
+            <artifactId>jakarta.servlet-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <!-- 自动配置机制（@AutoConfiguration + META-INF/.../AutoConfiguration.imports）：
+             用于注册 JWT 密钥启动校验等全局配置；各业务服务均经 spring-boot-starter 引入，
+             本模块声明仅为了编译期可用 @AutoConfiguration 注解 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-autoconfigure</artifactId>
+        </dependency>
+        <!-- 全局 JSON 序列化（装箱 Long→字符串，规避雪花 id 超出 JS 精度）：LongJsonAutoConfiguration 使用 -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <!-- Micrometer Tracing（Brave 桥接）：traceId/spanId 写入日志 MDC，
+             配合统一 logback-spring.xml 输出链路标识。版本由 Spring Boot BOM 托管 -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing-bridge-brave</artifactId>
+        </dependency>
+        <!-- 指标暴露：/actuator/prometheus（Prometheus 抓取，配合 nacos-config 暴露端点） -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+        <!-- Zipkin 上报（全链路追踪）：上报开关由 Nacos 共享配置的
+             management.tracing.zipkin.enabled=${ZIPKIN_ENABLED:false} 统一控制（务必先推送
+             nacos-config，否则共享配置缺失时上报器默认开启并连接 localhost:9411 产生噪音）。
+             需要全链路追踪时：docker compose up -d zipkin + 各服务设 ZIPKIN_ENABLED=true 重启 -->
+        <dependency>
+            <groupId>io.zipkin.reporter2</groupId>
+            <artifactId>zipkin-reporter-brave</artifactId>
+        </dependency>
+        <!-- 分布式滑动窗口限流（Redis ZSET + Lua）：chat/shop 等多实例限流复用。
+             optional=true 使引入该能力需在各服务显式声明 spring-boot-starter-data-redis，
+             避免把 Redis 自动配置传染给网关等不需要的服务 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <!-- Lombok @Slf4j 生成的日志代码依赖该门面（common 不引入 starter-logging，故显式声明） -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <!-- 共享 DTO（SpuDTO/SkuDTO 等）使用 jakarta.validation 注解，需显式提供校验 API -->
+        <dependency>
+            <groupId>jakarta.validation</groupId>
+            <artifactId>jakarta.validation-api</artifactId>
+        </dependency>
+
+        <!-- JWT 工具（JJWT 0.12.x 新链式 API） -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+        </dependency>
+
+        <!-- Lombok：编译期注解处理，不参与运行 -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- 单元测试（JUnit 5，版本由 Boot BOM 托管） -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

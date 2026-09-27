@@ -10,8 +10,55 @@ buildNumber.properties
 # https://maven.apache.org/tools/wrapper/#Usage_with_or_without_Binary_JAR
 .mvn/wrapper/maven-wrapper.jar
 
-# Eclipse m2e generated files
-# Eclipse Core
-.project
-# JDT-specific (Eclipse Java Development Tools)
-.classpath
+# IDE 配置
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.classpath
+*.project
+.settings/
+
+# 日志与本地临时文件
+logs/
+*.log
+*.pid
+
+# 环境变量与密钥（.env 不入库，模板见 .env.example）
+# 注意：只忽略根目录的 .env / .env.local；lingmart-frontend/.env.development 等
+# 是前端构建要用的公开配置，必须入库，不要写成 .env*
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ============================================================
+# 前端（Vue3）
+# lingmart-frontend/.gitignore 已忽略下列项，这里再写一遍做兜底：
+# 万一前端目录的 .gitignore 被误删，根规则仍能挡住 222MB 的依赖与构建产物。
+# ============================================================
+node_modules/
+dist/
+coverage/
+.vite/
+
+# ============================================================
+# 运行期数据（不入库）
+# uploads/：用户上传的图片（店铺 logo / 商品图 / 头像）。本地磁盘实现，
+# 根目录来自 UPLOAD_DIR（默认 ./uploads）。属运行期产物，不是源码；
+# 目录不存在时 UploadController 会自动 mkdirs（UploadController.java:94），
+# 故无需 .gitkeep 占位。生产接 OSS 后此目录自然废弃。
+# ============================================================
+uploads/
+
+# ============================================================
+# Claude Code 本地配置
+# settings*.json 里是本机绝对路径与个人授权记录（各人机器不同），不入库。
+# 若将来要共享 agents / skills / commands，那些子目录不在忽略之列，可正常提交。
+# ============================================================
+.claude/settings.json
+.claude/settings.local.json

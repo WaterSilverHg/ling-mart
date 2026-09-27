@@ -1,0 +1,55 @@
+# 轻营 · 检索服务配置
+server:
+  port: 12000
+  shutdown: graceful          # 优雅停机：等待在途请求处理完成
+
+spring:
+  application:
+    name: lingmart-search
+  threads:
+    virtual:
+      enabled: true
+  cloud:
+    nacos:
+      # 配置中心引导（共享配置见 Nacos DataId: lingmart-common.yaml）
+      config:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:nacos}
+        file-extension: yaml
+      # 注册中心（本地引导：保证配置中心不可用时服务仍能注册，不依赖共享配置）
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        fail-fast: false          # 注册失败不阻断启动（后台重试）
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:nacos}
+        # 强制注册 IP：规避 Windows 虚拟网卡（169.254.x.x）被误识别导致服务间访问抖动；
+        # 本地默认 127.0.0.1；Docker 部署经 NACOS_DISCOVERY_IP 覆盖为宿主机局域网 IP
+        ip: ${NACOS_DISCOVERY_IP:127.0.0.1}
+    # Sentinel 限流：URL 级 webmvc v6x 过滤器 + @SentinelResource 降级（规则见 classpath:sentinel-flow-rules.json）
+    sentinel:
+      filter:
+        enabled: ${SENTINEL_ENABLED:true}
+      eager: true                 # 启动即初始化，避免首个请求才加载
+      transport:
+        port: 8720                # Sentinel 客户端端口（各服务需唯一，避免本机冲突）
+  config:
+    # 加载 Nacos 共享配置（可选：Nacos 不可用时仍启动，但注册/管理端配置缺失）
+    import: "optional:nacos:lingmart-common.yaml?group=DEFAULT_GROUP&refreshEnabled=true"
+  # Elasticsearch：只读 product 服务上架时写入的索引（本机 docker 端口 +1：9201 → 容器 9200）
+  elasticsearch:
+    uris: ${ES_URIS:http://localhost:9201}
+  # Redis：热点关键词检索结果缓存
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6380}
+
+springdoc:
+  api-docs:
+    enabled: ${SPRINGDOC_ENABLED:true}      # 生产设 SPRINGDOC_ENABLED=false 关闭
+  swagger-ui:
+    enabled: ${SPRINGDOC_ENABLED:true}
+    path: /swagger-ui.html
+
+# 管理端点与链路追踪已移至 Nacos 共享配置（lingmart-common.yaml）

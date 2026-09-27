@@ -1,0 +1,165 @@
+# 轻营 · 网页浮窗 Agent(Copilot) 服务配置
+server:
+  port: 14000
+  shutdown: graceful          # 优雅停机：等待在途请求处理完成
+
+spring:
+  application:
+    name: lingmart-agent
+  # Java 21 虚拟线程
+  threads:
+    virtual:
+      enabled: true
+  # 服务注册与发现
+  cloud:
+    nacos:
+      # 配置中心引导（共享配置见 Nacos DataId: lingmart-common.yaml）
+      config:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:nacos}
+        file-extension: yaml
+        # 本服务以 optional 方式经 spring.config.import 引共享配置，关闭「必须含 nacos 导入」的
+        # 启动校验（NacosConfigImportChecker），避免 IDE 构建未拷资源时误报阻断启动
+        import-check:
+          enabled: ${NACOS_IMPORT_CHECK_ENABLED:false}
+      # 注册中心（本地引导：保证配置中心不可用时服务仍能注册，不依赖共享配置）
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        fail-fast: false          # 注册失败不阻断启动（后台重试）
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:nacos}
+        # 强制注册 IP：规避 Windows 虚拟网卡（169.254.x.x）被误识别导致服务间访问抖动；
+        # 本地默认 127.0.0.1；Docker 部署经 NACOS_DISCOVERY_IP 覆盖为宿主机局域网 IP
+        ip: ${NACOS_DISCOVERY_IP:127.0.0.1}
+  config:
+    # 本地开发读取项目根 .env：由 DotenvEnvironmentPostProcessor
+    # （src/main/java/com/lingmart/agent/config/，spring.factories 注册）从工作目录向上自动查找
+    # 包含 DEEPSEEK/DASHSCOPE Key 的 .env 注入属性源——不依赖工作目录、无绝对路径，并兼容行尾 # 注释。
+    # 容器/打包无 .env → 自动跳过，Key 由 docker compose 注入的环境变量提供。
+    # 优先级：真实环境变量 > .env > yml 默认值。
+    import:
+      - "optional:nacos:lingmart-common.yaml?group=DEFAULT_GROUP&refreshEnabled=true"
+  # Redis：Agent 会话记忆（TTL 自动过期）+ 每用户分布式限流
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6380}
+  # MySQL：仅用于「操作审计日志」（lingmart_agent 库，本服务独占）
+  #   ⚠️ initialization-fail-timeout: -1 = 连接池启动时连不上也**不阻断应用启动**。
+  #   Agent 是可选组件（不纳入 verify-health.sh / 「全部服务」），不能因为审计库没建好就整体起不来；
+  #   审计写入失败由 AgentAuditService 兜住（只告警）。
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3307}/lingmart_agent?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+    hikari:
+      initialization-fail-timeout: -1
+  # 底层 HTTP 客户端超时（Boot 会把带超时的 RestClient.Builder 交给 Spring AI 的 chat/embedding 装配使用）：
+  # 在 TCP/HTTP 层主动掐断长时间无响应的请求。虚拟线程上 Future.cancel 无法中断底层 HTTP 调用，
+  # 仅靠它会残留“僵尸连接”；read-timeout 建议 ≥ lingmart.agent.llm-timeout-ms，让友好超时提示先触发。
+  http:
+    client:
+      connect-timeout: ${HTTP_CLIENT_CONNECT_TIMEOUT:5s}
+      read-timeout: ${HTTP_CLIENT_READ_TIMEOUT:35s}
+  # Spring AI 模型选择：
+  #  - chat 走 OpenAI 兼容协议，默认【DeepSeek】(deepseek-chat，支持 Function Calling)。
+  #  - embedding 默认关闭 openai 自动装配（=none），改由 lingmart.agent.embedding 段手写注入
+  #    【阿里云百炼 text-embedding-v3】（DeepSeek 无 embedding 接口）。
+  #  - 备用本地 Ollama（仅强机器/离线场景）：置 model.chat/embedding=ollama 并启用 application-ollama.yml profile
+  ai:
+    model:
+      chat: ${AI_MODEL_CHAT:openai}
+      # none = 不启用 openai/ollama 的 embedding 自动装配（自定义嵌入 Bean 见 lingmart.agent.embedding）
+      embedding: ${AI_MODEL_EMBEDDING:none}
+    openai:
+      # DeepSeek API Key：https://platform.deepseek.com/ 申请，形如 sk-xxx。唯一必填项（对话）。
+      # 不填则服务可启动但对话调用会 401。仅服务端使用，勿写入前端。
+      api-key: ${DEEPSEEK_API_KEY:sk-请在此配置DEEPSEEK_API_KEY}
+      base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+      chat:
+        options:
+          model: ${DEEPSEEK_CHAT_MODEL:deepseek-chat}
+          temperature: ${AI_CHAT_TEMPERATURE:0.3}
+    # 向量库：ChromaDB（type=chroma 启用 ChromaVectorStoreAutoConfiguration，见
+    # ChromaVectorStoreTypes.CHROMA；startup 需 ChromaDB 可达以创建/复用 collection）
+    vectorstore:
+      type: ${AI_VECTORSTORE_TYPE:chroma}
+      chroma:
+        client:
+          # 本地 java -jar 连宿主对外端口 18000（容器内网固定 8000，见 docker-compose.yml）
+          host: ${CHROMA_HOST:http://localhost}
+          port: ${CHROMA_PORT:18000}
+        collection-name: ${CHROMA_COLLECTION:lingmart_kb}
+        # 首次启动自动创建 collection（tenant/db/collection 不存在时）；为 true 时
+        # ChromaVectorStore.afterPropertiesSet 会联网建库，故 ChromaDB 需先可达
+        initialize-schema: ${CHROMA_INITIALIZE_SCHEMA:true}
+
+# Agent 自有配置
+lingmart:
+  jwt:
+    secret: ${JWT_SECRET:lingmart-secret-key-for-jwt-2026-please-change-in-production-env}
+  agent:
+    # 会话记忆
+    memory:
+      ttl-hours: ${AGENT_MEMORY_TTL_HOURS:24}       # 会话保留时长（小时）
+      max-messages: ${AGENT_MAX_MESSAGES:20}        # 单会话最多保留消息数
+    # 操作审计日志（落 lingmart_agent.agent_audit_log，见 sql/lingmart_agent.sql）
+    audit:
+      enabled: ${AGENT_AUDIT_ENABLED:true}                    # 关闭则完全不写库（本地纯调试用）
+      retention-days: ${AGENT_AUDIT_RETENTION_DAYS:30}        # 保留天数，定时任务硬删除；<=0 表示不清理
+      # 用户消息摘录长度：审计要能还原"用户问了什么"，但不能把对话正文落库，故只存定长摘录。
+      # 设为 0 = 完全不记正文（敏感信息最小化最严档）
+      message-excerpt-chars: ${AGENT_AUDIT_EXCERPT_CHARS:80}
+    # 知识库（RAG）
+    kb:
+      enabled: ${AGENT_KB_ENABLED:true}             # 是否启用知识检索（关闭则纯对话，不连向量库）
+      # 启动时若知识库为空则后台重建（默认 true：新环境“第一次”就能基于知识库回答，
+      # 否则要先手工 POST /api/agent/admin/kb/rebuild 才有知识；重建在后台虚拟线程执行、
+      # 失败只告警不阻断启动，代价只是几份 kb/*.md 的嵌入调用）
+      rebuild-on-start: ${AGENT_KB_REBUILD_ON_START:true}
+      top-k: ${AGENT_KB_TOP_K:3}                    # 相似度检索返回段落数
+      chunk-size: ${AGENT_KB_CHUNK_SIZE:400}        # 文本切块目标大小（token）
+      # 单次嵌入请求的最大输入条数：百炼 text-embedding-v3 硬上限 10，调大会 400
+      embed-batch-size: ${AGENT_KB_EMBED_BATCH_SIZE:10}
+      overlap-chars: ${AGENT_KB_OVERLAP_CHARS:60}   # 相邻切块字符级重叠（检索端会做重叠去重，此值主要影响向量质量）
+      # 额外知识源目录（逗号分隔的本地目录；默认仅加载 classpath:kb/**）
+      extra-dirs: ${AGENT_KB_EXTRA_DIRS:}
+    # 只读工具（服务端自主循环）：免用户确认、服务端直接执行，故成套设闸门
+    read-only:
+      enabled: ${AGENT_READONLY_ENABLED:true}
+      max-calls-per-turn: ${AGENT_READONLY_MAX_CALLS_PER_TURN:5}       # 单轮最多执行次数
+      turn-budget-ms: ${AGENT_READONLY_TURN_BUDGET_MS:15000}           # 单轮循环总时长预算（3 次连查≈7.5s+作答）
+      max-calls-per-session: ${AGENT_READONLY_MAX_CALLS_PER_SESSION:50} # 单会话累计上限（防爬取）
+      cache-ttl-seconds: ${AGENT_READONLY_CACHE_TTL_SECONDS:30}        # 结果短缓存（含 userId，避免跨用户串数据）
+      max-result-chars: ${AGENT_READONLY_MAX_RESULT_CHARS:1500}        # 工具返回文本上限
+      # 经网关调用业务 API（案 B）：Agent 只透传用户 JWT，不做权限判断——鉴权仍是网关+业务服务一份
+      gateway-base-url: ${AGENT_GATEWAY_BASE_URL:http://localhost:88}
+    # 输入约束与限流
+    max-message-length: ${AGENT_MAX_MESSAGE_LENGTH:2000}  # 用户消息最大字符数
+    max-context-chars: ${AGENT_MAX_CONTEXT_CHARS:30000}   # 拼给模型的“历史+当前”字符预算，超出裁剪最旧（近似防超窗）
+    rate-per-user-minute: ${AGENT_RATE_PER_USER_MINUTE:10}  # 每用户每分钟最多请求数（Redis 分布式限流）
+    # 运行控制
+    max-tool-iterations: ${AGENT_MAX_TOOL_ITERATIONS:20}   # 单会话最多可执行页面操作次数（防无限确认）
+    max-tools-per-turn: ${AGENT_MAX_TOOLS_PER_TURN:1}      # 单轮最多下发的页面操作数（服务端强制截断，防多卡夹带恶意动作）
+    max-pending-actions: ${AGENT_MAX_PENDING_ACTIONS:5}    # 单会话最多保留的未确认操作意图数（挂起意图为追加语义，超出丢最旧）
+    max-sessions-per-user: ${AGENT_MAX_SESSIONS_PER_USER:50}  # 单用户会话数上限，超出淘汰最久未活跃的会话（防 sessionId 无限创建撑爆 Redis）
+    max-concurrent-sse: ${AGENT_MAX_CONCURRENT:32}         # SSE 最大并发（信号量，超出快速拒绝）
+    typing-delay-ms: ${AGENT_TYPING_DELAY_MS:0}            # 打字机间隔毫秒，0=实时无延迟
+    llm-timeout-ms: ${AGENT_LLM_TIMEOUT_MS:30000}          # 单次 LLM 调用超时毫秒，超时友好降级
+    # 知识库嵌入模型：默认阿里云百炼 text-embedding-v3（DeepSeek 无 embedding，须独立嵌入厂商；百炼 key 可另开）
+    embedding:
+      enabled: ${AGENT_EMBEDDING_ENABLED:true}   # false=不注入嵌入 Bean（知识库不可用，纯对话仍可用）
+      api-key: ${DASHSCOPE_API_KEY:sk-请在此配置DASHSCOPE_API_KEY}
+      base-url: ${DASHSCOPE_EMBEDDING_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+      model: ${DASHSCOPE_EMBEDDING_MODEL:text-embedding-v3}
+
+springdoc:
+  api-docs:
+    enabled: ${SPRINGDOC_ENABLED:true}
+  swagger-ui:
+    enabled: ${SPRINGDOC_ENABLED:true}
+    path: /swagger-ui.html
+
+# 管理端点与链路追踪已移至 Nacos 共享配置（lingmart-common.yaml）

@@ -1,0 +1,10 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="lingmart-ware" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot">
+    <module name="lingmart-ware" />
+    <option name="SPRING_BOOT_MAIN_CLASS" value="com.lingmart.ware.WarehouseApplication" />
+    <option name="ENABLE_LAUNCH_OPTIMIZATION" value="false" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

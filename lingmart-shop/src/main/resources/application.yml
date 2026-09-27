@@ -1,0 +1,96 @@
+# 轻营 · 店铺服务配置
+server:
+  port: 8100
+  shutdown: graceful          # 优雅停机：等待在途请求处理完成
+
+spring:
+  application:
+    name: lingmart-shop
+  threads:
+    virtual:
+      enabled: true
+  # 图片上传限制（与 UploadController 的 5MB 校验对齐；需大于网关 codec 上限的一半）
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 20MB
+  cloud:
+    nacos:
+      # 配置中心引导（共享配置见 Nacos DataId: lingmart-common.yaml）
+      config:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:nacos}
+        file-extension: yaml
+      # 注册中心（本地引导：保证配置中心不可用时服务仍能注册，不依赖共享配置）
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        fail-fast: false          # 注册失败不阻断启动（后台重试）
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:nacos}
+        # 强制注册 IP：规避 Windows 虚拟网卡（169.254.x.x）被误识别导致服务间访问抖动；
+        # 本地默认 127.0.0.1；Docker 部署经 NACOS_DISCOVERY_IP 覆盖为宿主机局域网 IP
+        ip: ${NACOS_DISCOVERY_IP:127.0.0.1}
+    openfeign:
+      client:
+        config:
+          default:
+            connect-timeout: 3000
+            read-timeout: 30000
+  config:
+    # 加载 Nacos 共享配置（可选：Nacos 不可用时仍启动，但注册/MyBatis/管理端配置缺失）
+    import: "optional:nacos:lingmart-common.yaml?group=DEFAULT_GROUP&refreshEnabled=true"
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3307}/lingmart_shop?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+  # Redis：图片上传分布式限流（多实例共享，防恶意灌盘）
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6380}
+
+# MyBatis-Plus 配置已移至 Nacos 共享配置（lingmart-common.yaml）
+
+# 轻营自定义配置
+lingmart:
+  upload:
+    # 图片上传根目录（本地磁盘存储；生产用 UPLOAD_DIR 环境变量覆盖，或替换为 OSS 实现）
+    dir: ${UPLOAD_DIR:./uploads}
+
+springdoc:
+  api-docs:
+    enabled: ${SPRINGDOC_ENABLED:true}      # 生产设 SPRINGDOC_ENABLED=false 关闭
+  swagger-ui:
+    enabled: ${SPRINGDOC_ENABLED:true}
+    path: /swagger-ui.html
+
+# Seata 分布式事务客户端（2.5.0 AT：开店申请建店+建商品跨服务强一致）
+seata:
+  enabled: true
+  application-id: lingmart-shop
+  tx-service-group: lingmart_tx_group
+  config:
+    type: file
+  # TC 地址发现方式：file=直连下面的 grouplist（默认，推荐） / nacos=从 Nacos 的 SEATA_GROUP 取。
+  # 默认 file 是为了绕开「TC 在容器里、往 Nacos 注册了 Docker 内网 IP（172.x），宿主机服务连不上」
+  # 导致的 `register RM failed: can not connect to services-server`，细节见 order 服务同段注释。
+  registry:
+    type: ${SEATA_REGISTRY_TYPE:file}
+    nacos:
+      server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+      group: SEATA_GROUP
+      username: ${NACOS_USERNAME:nacos}
+      password: ${NACOS_PASSWORD:nacos}
+  service:
+    vgroup-mapping:
+      lingmart_tx_group: default
+    grouplist:
+      # 本机开发 → 127.0.0.1:8091；容器编排由 docker-compose.business.yml 覆盖为 seata-server:8091
+      default: ${SEATA_GROUPLIST:127.0.0.1:8091}
+
+# 直连模式下 Seata FileRegistry 真正读取的键名（等价于上面的 seata.service.grouplist.default，原因见 order 服务同段注释）
+service.default.grouplist: ${SEATA_GROUPLIST:127.0.0.1:8091}
+
+# 管理端点与链路追踪已移至 Nacos 共享配置（lingmart-common.yaml）

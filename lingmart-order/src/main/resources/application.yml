@@ -1,0 +1,108 @@
+# 轻营 · 订单服务配置
+server:
+  port: 9000
+  shutdown: graceful          # 优雅停机：等待在途请求处理完成
+
+spring:
+  application:
+    name: lingmart-order
+  threads:
+    virtual:
+      enabled: true
+  cloud:
+    nacos:
+      # 配置中心引导（共享配置见 Nacos DataId: lingmart-common.yaml）
+      config:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:nacos}
+        file-extension: yaml
+      # 注册中心（本地引导：保证配置中心不可用时服务仍能注册，不依赖共享配置）
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        fail-fast: false          # 注册失败不阻断启动（后台重试）
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:nacos}
+        # 强制注册 IP：规避 Windows 虚拟网卡（169.254.x.x）被误识别导致服务间访问抖动；
+        # 本地默认 127.0.0.1；Docker 部署经 NACOS_DISCOVERY_IP 覆盖为宿主机局域网 IP
+        ip: ${NACOS_DISCOVERY_IP:127.0.0.1}
+    openfeign:
+      client:
+        config:
+          default:
+            connect-timeout: 3000
+            read-timeout: 30000
+    # Sentinel 限流：URL 级 webmvc v6x 过滤器 + @SentinelResource 降级（规则见 classpath:sentinel-flow-rules.json）
+    sentinel:
+      filter:
+        enabled: ${SENTINEL_ENABLED:true}
+      eager: true                 # 启动即初始化，避免首个请求才加载
+      transport:
+        port: 8721                # Sentinel 客户端端口（各服务需唯一，避免本机冲突）
+  config:
+    # 加载 Nacos 共享配置（可选：Nacos 不可用时仍启动，但注册/MyBatis/管理端配置缺失）
+    import: "optional:nacos:lingmart-common.yaml?group=DEFAULT_GROUP&refreshEnabled=true"
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3307}/lingmart_order?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    virtual-host: /
+    # 消费失败重试由 RabbitMqConfig 的容器工厂统一配置（退避重试 → RepublishMessageRecoverer 重发死信），
+    # 不依赖队列级死信参数，旧队列无需删除即可热升级
+
+# MyBatis-Plus 配置已移至 Nacos 共享配置（lingmart-common.yaml）
+
+springdoc:
+  api-docs:
+    enabled: ${SPRINGDOC_ENABLED:true}      # 生产设 SPRINGDOC_ENABLED=false 关闭
+  swagger-ui:
+    enabled: ${SPRINGDOC_ENABLED:true}
+    path: /swagger-ui.html
+
+# Seata 分布式事务客户端（2.5.0 AT 模式）
+seata:
+  enabled: true
+  application-id: lingmart-order
+  tx-service-group: lingmart_tx_group
+  config:
+    type: file
+  # TC 地址发现方式：file=直连下面的 grouplist（默认，推荐） / nacos=从 Nacos 的 SEATA_GROUP 取
+  #
+  # 为什么默认 file：用 nacos 方式时，客户端拿到的是 TC **往 Nacos 注册的那个 IP**——TC 跑在容器里时
+  # 这个 IP 通常是 Docker 内网地址（如 172.18.0.9），宿主机上的服务根本路由不到，启动即报
+  # `register RM failed: can not connect to services-server`。直连模式完全绕开这件事：
+  # 客户端只认下面的 grouplist，TC 把自己注册成什么都不影响。
+  registry:
+    type: ${SEATA_REGISTRY_TYPE:file}
+    nacos:
+      server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+      group: SEATA_GROUP          # 与 TC 的 nacos.group 一致（仅 SEATA_REGISTRY_TYPE=nacos 时生效）
+      username: ${NACOS_USERNAME:nacos}
+      password: ${NACOS_PASSWORD:nacos}
+  service:
+    vgroup-mapping:
+      lingmart_tx_group: default
+    grouplist:
+      # 与 vgroup-mapping 里的集群名（default）对应：
+      #   本机开发（TC 容器把 8091 映射到宿主）→ 127.0.0.1:8091（默认）
+      #   业务服务跑容器内 → docker-compose.business.yml 覆盖为 seata-server:8091（compose 服务名直连）
+      default: ${SEATA_GROUPLIST:127.0.0.1:8091}
+
+# 直连模式下 Seata FileRegistry 真正读取的键名（等价于上面的 seata.service.grouplist.default）：
+# Seata 2.5 的 FileRegistryServiceImpl 读的是 `service.<集群>.grouplist`（见 ConfigurationKeys.GROUPLIST_POSTFIX），
+# 而 `seata.service.grouplist.*` 是 Spring 侧绑定形式。两种写法同时提供，避免因版本差异导致
+# ConfigNotFoundException: service.default.grouplist configuration item is required（多余的键无副作用）。
+service.default.grouplist: ${SEATA_GROUPLIST:127.0.0.1:8091}
+
+# 轻营自定义：订单超时自动取消延迟（毫秒，演示用 2 分钟）
+lingmart:
+  order:
+    timeout-ms: 120000
+
+# 管理端点与链路追踪已移至 Nacos 共享配置（lingmart-common.yaml）

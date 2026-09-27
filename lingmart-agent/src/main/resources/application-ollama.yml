@@ -1,0 +1,25 @@
+# 备用 Profile：本地 Ollama 模型（数据不出服务器 / 免 API 费用）。
+# 启用方式：启动参数加 --spring.profiles.active=ollama，并保证本机已安装且运行 Ollama：
+#   ollama pull qwen2.5:7b
+# 切换后 spring.ai.model.chat/embedding 均为 ollama；embedding 用独立本地模型（nomic-embed-text）。
+# 注：main 配置中的 spring.ai.openai.* 与 spring.ai.vectorstore.chroma.* 不受影响，知识库仍走 ChromaDB。
+spring:
+  ai:
+    model:
+      chat: ollama
+      embedding: ollama
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      chat:
+        options:
+          model: ${OLLAMA_MODEL:qwen2.5:7b}
+          temperature: 0.2
+      embedding:
+        options:
+          model: ${OLLAMA_EMBEDDING_MODEL:nomic-embed-text}
+
+# 让位：嵌入改走 Ollama，关闭默认的百炼嵌入 Bean
+lingmart:
+  agent:
+    embedding:
+      enabled: false

@@ -1,0 +1,10 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="lingmart-auth" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot">
+    <module name="lingmart-auth" />
+    <option name="SPRING_BOOT_MAIN_CLASS" value="com.lingmart.auth.AuthApplication" />
+    <option name="ENABLE_LAUNCH_OPTIMIZATION" value="false" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

@@ -1,0 +1,71 @@
+# 轻营 · 认证中心配置
+server:
+  port: 8000
+  shutdown: graceful          # 优雅停机：等待在途请求处理完成
+
+spring:
+  application:
+    name: lingmart-auth
+  # Java 21 虚拟线程：Tomcat 请求处理线程池自动切换为虚拟线程
+  threads:
+    virtual:
+      enabled: true
+  # 服务注册与发现
+  cloud:
+    nacos:
+      # 配置中心引导（共享配置见 Nacos DataId: lingmart-common.yaml）
+      config:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:nacos}
+        file-extension: yaml
+      # 注册中心（本地引导：保证配置中心不可用时服务仍能注册，不依赖共享配置）
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        fail-fast: false          # 注册失败不阻断启动（后台重试）
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:nacos}
+        # 强制注册 IP：规避 Windows 虚拟网卡（169.254.x.x）被误识别导致服务间访问抖动；
+        # 本地默认 127.0.0.1；Docker 部署经 NACOS_DISCOVERY_IP 覆盖为宿主机局域网 IP
+        ip: ${NACOS_DISCOVERY_IP:127.0.0.1}
+  config:
+    # 加载 Nacos 共享配置（可选：Nacos 不可用时仍启动，但注册/MyBatis/管理端配置缺失）
+    import: "optional:nacos:lingmart-common.yaml?group=DEFAULT_GROUP&refreshEnabled=true"
+  # 数据源：lingmart_auth 独立库（生产用环境变量覆盖 DB_HOST/DB_PORT/DB_USERNAME/DB_PASSWORD）
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3307}/lingmart_auth?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+  # Redis：验证码存储 + 登录/发码分布式限流（docker-compose 暴露端口 6380）
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6380}
+      password: ${REDIS_PASSWORD:}
+      timeout: 3s
+
+# MyBatis-Plus 配置已移至 Nacos 共享配置（lingmart-common.yaml）
+
+# 轻营自定义配置（生产通过环境变量覆盖）
+lingmart:
+  jwt:
+    # 对称签名密钥（HS256 要求至少 32 字节）；生产务必用 JWT_SECRET 环境变量覆盖
+    secret: ${JWT_SECRET:lingmart-secret-key-for-jwt-2026-please-change-in-production-env}
+    # Token 有效期（分钟）
+    expire-minutes: ${JWT_EXPIRE_MINUTES:120}
+  admin:
+    # 启动时自动预置的管理员账号（若不存在）
+    phone: ${ADMIN_PHONE:13800000000}
+    password: ${ADMIN_PASSWORD:admin123}
+  auth:
+    # 开发模式开关：true 时 /code/send 返回验证码明文便于联调（本地开发默认开启，
+    # 因无真实短信通道，前端注册/登录需回填验证码）；生产务必用 DEV_CODE_ENABLED=false 覆盖
+    dev-code-enabled: ${DEV_CODE_ENABLED:true}
+
+logging:
+  level:
+    com.alibaba.nacos: DEBUG
+    org.springframework.cloud: DEBUG
+
+# 管理端点与链路追踪已移至 Nacos 共享配置（lingmart-common.yaml）

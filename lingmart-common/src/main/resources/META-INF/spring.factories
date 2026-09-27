@@ -1,0 +1,4 @@
+# 注册自定义 EnvironmentPostProcessor：本地开发（IDEA / java -jar）自动向上查找并加载项目根 .env，
+# 使 ops-checklist/README 中「在 .env 覆盖 JWT_SECRET / DEV_CODE_ENABLED / ZIPKIN_ENABLED 等」的说法
+# 在本地 java -jar 场景同样成立（此前只有 lingmart-agent 加载 .env，其余 8 个服务读不到）。
+org.springframework.boot.env.EnvironmentPostProcessor=com.lingmart.common.config.DotenvEnvironmentPostProcessor

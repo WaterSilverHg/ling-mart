@@ -1,0 +1,13 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="全部服务" type="CompoundRunConfigurationType">
+    <toRun name="lingmart-auth" type="SpringBootApplicationConfigurationType" />
+    <toRun name="lingmart-chat" type="SpringBootApplicationConfigurationType" />
+    <toRun name="lingmart-gateway" type="SpringBootApplicationConfigurationType" />
+    <toRun name="lingmart-order" type="SpringBootApplicationConfigurationType" />
+    <toRun name="lingmart-product" type="SpringBootApplicationConfigurationType" />
+    <toRun name="lingmart-search" type="SpringBootApplicationConfigurationType" />
+    <toRun name="lingmart-shop" type="SpringBootApplicationConfigurationType" />
+    <toRun name="lingmart-ware" type="SpringBootApplicationConfigurationType" />
+    <method v="2" />
+  </configuration>
+</component>

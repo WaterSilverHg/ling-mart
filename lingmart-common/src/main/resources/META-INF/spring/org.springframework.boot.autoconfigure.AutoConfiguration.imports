@@ -1,0 +1,2 @@
+com.lingmart.common.jwt.JwtSecretValidatorAutoConfiguration
+com.lingmart.common.jackson.LongJsonAutoConfiguration

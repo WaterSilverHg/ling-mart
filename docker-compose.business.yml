@@ -1,0 +1,190 @@
+# =============================================================
+# 轻营 · 业务服务编排（独立文件，与基础设施 docker-compose.yml 叠加使用）
+#
+# 启动步骤：
+#   1. mvn -DskipTests clean package                # 先打包各服务 fat jar
+#   2. scripts/push-nacos-config.sh                 # 先把共享配置 + Sentinel 规则推送到 Nacos
+#   3. docker compose -f docker-compose.yml -f docker-compose.business.yml build
+#   4. docker compose -f docker-compose.yml -f docker-compose.business.yml up -d
+#
+# 说明：业务容器经 compose 网络用服务名连基础设施（mysql:3306 / redis:6379 / elasticsearch:9200 等
+#       容器内端口），与宿主机 java -jar 启动互不影响；两者端口映射相同，勿同时占用。
+# =============================================================
+
+x-business-env: &business-env
+  NACOS_SERVER_ADDR: nacos:8848
+  NACOS_USERNAME: nacos
+  NACOS_PASSWORD: ${NACOS_PASSWORD:-nacos}
+  # 业务容器注册到 Nacos 的 IP（已参数化，默认 127.0.0.1）：
+  #   容器编排部署必须在 .env 覆盖为宿主机局域网 IP（容器间经宿主机发布端口互访），
+  #   否则服务间 Feign 找不到实例；换网络/换机后需同步更新。
+  NACOS_DISCOVERY_IP: ${NACOS_DISCOVERY_IP:-127.0.0.1}
+  # Seata TC 地址：容器内直接用 compose 服务名直连 TC（客户端 registry.type 默认 file + grouplist），
+  #   因此**不再依赖** TC 往 Nacos 注册成什么 IP——这正是宿主机模式上报
+  #   `can not connect to services-server`（TC 注册了 Docker 内网 IP）的根因规避方式。
+  SEATA_GROUPLIST: seata-server:8091
+  # JWT 签名密钥：**必须在 .env 提供**，未设置时 compose 直接拒绝启动（`?` 语法）。
+  # 此处刻意不留兜底默认值：仓库里出现过的任何密钥都视为已泄露，用它签发的 token 谁都能伪造。
+  # 生成：openssl rand -hex 32   （≥32 字节；与本地 java -jar 共用同一个 .env）
+  JWT_SECRET: ${JWT_SECRET:?请在 .env 设置 JWT_SECRET（生成：openssl rand -hex 32）}
+  TRACING_SAMPLING_PROBABILITY: "1.0"
+
+services:
+  # ---------- 认证中心 :8000 ----------
+  lingmart-auth:
+    build: { context: ./lingmart-auth, dockerfile: ../docker/business.Dockerfile }
+    container_name: lingmart-auth
+    environment:
+      <<: *business-env
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USERNAME: root
+      DB_PASSWORD: ${DB_PASSWORD:-root}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      # 验证码明文返回开关：容器编排默认关闭（此前写死 true，导致在 .env 里设 false 也关不掉明文验证码）
+      DEV_CODE_ENABLED: ${DEV_CODE_ENABLED:-false}
+    ports: ["8000:8000"]
+    depends_on: [nacos, mysql, redis]
+    restart: unless-stopped
+
+  # ---------- 店铺服务 :8100 ----------
+  lingmart-shop:
+    build: { context: ./lingmart-shop, dockerfile: ../docker/business.Dockerfile }
+    container_name: lingmart-shop
+    environment:
+      <<: *business-env
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USERNAME: root
+      DB_PASSWORD: ${DB_PASSWORD:-root}
+      UPLOAD_DIR: /app/uploads
+    ports: ["8100:8100"]
+    volumes:
+      - shop-uploads:/app/uploads
+    depends_on: [nacos, mysql, seata-server]
+    restart: unless-stopped
+
+  # ---------- 商品服务 :10001 ----------
+  lingmart-product:
+    build: { context: ./lingmart-product, dockerfile: ../docker/business.Dockerfile }
+    container_name: lingmart-product
+    environment:
+      <<: *business-env
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USERNAME: root
+      DB_PASSWORD: ${DB_PASSWORD:-root}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      ES_URIS: http://elasticsearch:9200
+    ports: ["10001:10001"]
+    depends_on: [nacos, mysql, redis, elasticsearch]
+    restart: unless-stopped
+
+  # ---------- 仓储服务 :11000 ----------
+  lingmart-ware:
+    build: { context: ./lingmart-ware, dockerfile: ../docker/business.Dockerfile }
+    container_name: lingmart-ware
+    environment:
+      <<: *business-env
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USERNAME: root
+      DB_PASSWORD: ${DB_PASSWORD:-root}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+    ports: ["11000:11000"]
+    depends_on: [nacos, mysql, rabbitmq, seata-server]
+    restart: unless-stopped
+
+  # ---------- 订单服务 :9000 ----------
+  lingmart-order:
+    build: { context: ./lingmart-order, dockerfile: ../docker/business.Dockerfile }
+    container_name: lingmart-order
+    environment:
+      <<: *business-env
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USERNAME: root
+      DB_PASSWORD: ${DB_PASSWORD:-root}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+    ports: ["9000:9000"]
+    depends_on: [nacos, mysql, rabbitmq, seata-server]
+    restart: unless-stopped
+
+  # ---------- 检索服务 :12000 ----------
+  lingmart-search:
+    build: { context: ./lingmart-search, dockerfile: ../docker/business.Dockerfile }
+    container_name: lingmart-search
+    environment:
+      <<: *business-env
+      ES_URIS: http://elasticsearch:9200
+    ports: ["12000:12000"]
+    depends_on: [nacos, elasticsearch]
+    restart: unless-stopped
+
+  # ---------- 聊天服务 :13000 ----------
+  lingmart-chat:
+    build: { context: ./lingmart-chat, dockerfile: ../docker/business.Dockerfile }
+    container_name: lingmart-chat
+    environment:
+      <<: *business-env
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USERNAME: root
+      DB_PASSWORD: ${DB_PASSWORD:-root}
+    ports: ["13000:13000"]
+    depends_on: [nacos, mysql]
+    restart: unless-stopped
+
+  # ---------- 网页浮窗 Agent :14000 ----------
+  # 会话记忆存 Redis；知识库走 ChromaDB（chroma:8000）。LLM：对话=DeepSeek，嵌入=阿里云百炼(两把 Key 见 .env)。
+  # 若改用本地 Ollama：再加 --spring.profiles.active=ollama，并把 OLLAMA_BASE_URL 指向 ollama:11434。
+  lingmart-agent:
+    build: { context: ./lingmart-agent, dockerfile: ../docker/business.Dockerfile }
+    container_name: lingmart-agent
+    environment:
+      <<: *business-env
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      # MySQL：仅用于「操作审计日志」（lingmart_agent 库，本服务独占）。
+      # 首次部署需先执行 sql/lingmart_agent.sql 建库（存量 MySQL 卷不会自动重跑 initdb）。
+      # 库不可达时 agent 仍能启动（hikari.initialization-fail-timeout: -1），审计写入只告警。
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USERNAME: root
+      DB_PASSWORD: ${DB_PASSWORD:-root}
+      CHROMA_HOST: http://chroma
+      CHROMA_PORT: "8000"    # 容器内网 8000（宿主对外映射 18000，见 docker-compose.yml chroma）
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-sk-please-set}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_CHAT_MODEL: ${DEEPSEEK_CHAT_MODEL:-deepseek-chat}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-sk-please-set}
+      DASHSCOPE_EMBEDDING_BASE_URL: ${DASHSCOPE_EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      DASHSCOPE_EMBEDDING_MODEL: ${DASHSCOPE_EMBEDDING_MODEL:-text-embedding-v3}
+      OLLAMA_BASE_URL: http://ollama:11434
+      # 只读工具调用业务 API 的入口：必须指向**网关**（案 B——Agent 只透传用户 JWT，不做权限判断）。
+      # 容器内用 compose 服务名，不能沿用 yml 默认的 localhost（那是容器自身）。
+      AGENT_GATEWAY_BASE_URL: http://lingmart-gateway:88
+    ports: ["14000:14000"]
+    depends_on: [nacos, redis, chroma, mysql]
+    restart: unless-stopped
+
+  # ---------- API 网关 :88 ----------
+  lingmart-gateway:
+    build: { context: ./lingmart-gateway, dockerfile: ../docker/business.Dockerfile }
+    container_name: lingmart-gateway
+    environment:
+      <<: *business-env
+    ports: ["88:88"]
+    depends_on: [nacos, lingmart-auth, lingmart-shop, lingmart-product, lingmart-ware, lingmart-order, lingmart-search, lingmart-chat, lingmart-agent]
+    restart: unless-stopped
+
+volumes:
+  shop-uploads:

@@ -1,0 +1,42 @@
+# ============================================================
+# 轻营 · Nacos 共享配置（DataId：lingmart-common.yaml，group：DEFAULT_GROUP）
+# 由全部 8 个业务服务经 spring.config.import 引入，集中管理重复配置：
+#   - MyBatis-Plus 通用配置
+#   - 管理端点与链路追踪
+# 说明：Nacos 注册中心（discovery）配置保留在各服务本地 application.yml，
+#       避免「注册依赖配置中心」的鸡生蛋问题——配置中心不可用时服务仍能正常注册。
+# 环境变量占位符（${NACOS_*} 等）在 Nacos 中同样生效，启动时由本地环境解析。
+# 修改后用 scripts/push-nacos-config.sh 推送（或 Nacos 控制台编辑），无需重启服务即热更新。
+# ============================================================
+
+# MyBatis-Plus 通用配置（logic-delete-field 对无 deleted 字段的实体自动忽略）
+mybatis-plus:
+  configuration:
+    # 开发阶段打印 SQL，便于调试；生产可关闭
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      # 主键策略：assign_id = MyBatis-Plus 雪花（64 位）。主键不再依赖 DB 自增，避免暴露递增量并防枚举；
+      # 注意：雪花 id 超 JS 精确整数上限，已由 common 的 LongJsonAutoConfiguration 将装箱 Long 输出为字符串。
+      # 多副本/多实例部署同一服务时，需为各实例设置不同 worker-id 防止雪花冲突：
+      #   mybatis-plus.global-config.worker-id / datacenter-id（默认 0）。
+      id-type: assign_id
+      # 逻辑删除字段（业务表通用约定）
+      logic-delete-field: deleted
+
+# 管理端点与链路追踪（统一）
+management:
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
+    # Zipkin 全链路上报：依赖 zipkin-reporter-brave 已随 common 引入；zipkin 容器随 docker compose 默认启动。
+    # 默认开启（开箱即可跨服务串联 span）；若只想跑基础设施、不要上报噪音，可设 ZIPKIN_ENABLED=false。
+    zipkin:
+      enabled: ${ZIPKIN_ENABLED:true}
+      # 上报地址：docker-compose 内置 zipkin 容器（localhost:9411），可用 ZIPKIN_BASE_URL 覆盖
+      endpoint: ${ZIPKIN_BASE_URL:http://localhost:9411/api/v2/spans}
+  endpoints:
+    web:
+      exposure:
+        # prometheus：/actuator/prometheus 指标抓取端点（需 micrometer-registry-prometheus）
+        include: health,info,prometheus

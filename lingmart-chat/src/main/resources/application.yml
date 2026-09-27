@@ -1,0 +1,72 @@
+# 轻营 · 聊天服务配置
+server:
+  port: 13000
+  shutdown: graceful          # 优雅停机：等待在途请求处理完成
+
+spring:
+  application:
+    name: lingmart-chat
+  # Java 21 虚拟线程
+  threads:
+    virtual:
+      enabled: true
+  # 服务注册与发现
+  cloud:
+    nacos:
+      # 配置中心引导（共享配置见 Nacos DataId: lingmart-common.yaml）
+      config:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:nacos}
+        file-extension: yaml
+      # 注册中心（本地引导：保证配置中心不可用时服务仍能注册，不依赖共享配置）
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        fail-fast: false          # 注册失败不阻断启动（后台重试）
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:nacos}
+        # 强制注册 IP：规避 Windows 虚拟网卡（169.254.x.x）被误识别导致服务间访问抖动；
+        # 本地默认 127.0.0.1；Docker 部署经 NACOS_DISCOVERY_IP 覆盖为宿主机局域网 IP
+        ip: ${NACOS_DISCOVERY_IP:127.0.0.1}
+    openfeign:
+      client:
+        config:
+          default:
+            connect-timeout: 3000
+            read-timeout: 30000
+  config:
+    # 加载 Nacos 共享配置（可选：Nacos 不可用时仍启动，但注册/MyBatis/管理端配置缺失）
+    import: "optional:nacos:lingmart-common.yaml?group=DEFAULT_GROUP&refreshEnabled=true"
+  # 数据源：lingmart_chat 独立库（会话 + 消息）
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3307}/lingmart_chat?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+  # Redis：发消息分布式限流（多实例共享，防刷屏）
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6380}
+
+# MyBatis-Plus 配置已移至 Nacos 共享配置（lingmart-common.yaml）
+
+springdoc:
+  api-docs:
+    enabled: ${SPRINGDOC_ENABLED:true}
+  swagger-ui:
+    enabled: ${SPRINGDOC_ENABLED:true}
+    path: /swagger-ui.html
+
+# 轻营自定义配置
+lingmart:
+  jwt:
+    # 与网关/auth 一致；WebSocket 鉴权 token 经 STOMP CONNECT 头的 native header「token」携带，
+    # 由 JwtChannelInterceptor 校验（浏览器原生 WebSocket 无法自定义 HTTP 头）
+    secret: ${JWT_SECRET:lingmart-secret-key-for-jwt-2026-please-change-in-production-env}
+  chat:
+    rate-limit:
+      # 发送频控：每用户 30 秒内最多发消息条数（Redis 分布式限流，可配）
+      max-per-30s: ${CHAT_SEND_MAX_PER_30S:30}
+
+# 管理端点与链路追踪已移至 Nacos 共享配置（lingmart-common.yaml）

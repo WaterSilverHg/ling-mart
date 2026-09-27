@@ -1,0 +1,4 @@
+[
+  {"resource": "searchProduct", "grade": 1, "count": 50},
+  {"resource": "/api/search", "grade": 1, "count": 50}
+]

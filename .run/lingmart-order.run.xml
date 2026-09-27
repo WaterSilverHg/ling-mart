@@ -1,0 +1,10 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="lingmart-order" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot">
+    <module name="lingmart-order" />
+    <option name="SPRING_BOOT_MAIN_CLASS" value="com.lingmart.order.OrderApplication" />
+    <option name="ENABLE_LAUNCH_OPTIMIZATION" value="false" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

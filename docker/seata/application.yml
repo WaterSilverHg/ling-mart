@@ -1,0 +1,41 @@
+# =============================================================
+# 轻营 · Seata TC 服务端配置（Seata 2.x 用 application.yml，1.x 的 registry.conf/file.conf 已弃用）
+# 挂载到容器 /seata-server/resources/application.yml，注册到 Nacos（SEATA_GROUP / default 集群）
+# 客户端 tx-service-group=lingmart_tx_group 需映射到本 TC 的 default 集群
+#
+# 注意：Seata 服务端是 Netty RPC 服务（非 Web 应用）。绝不能设置 server.port，
+#       否则 Spring Boot 会按 Servlet Web 应用启动，而镜像没有 servlet 容器 → 启动失败。
+#       必须显式 spring.main.web-application-type: none（bind mount 会覆盖镜像默认配置）。
+# =============================================================
+spring:
+  main:
+    web-application-type: none
+  application:
+    name: seata-server
+
+logging:
+  file:
+    path: /root/logs/seata
+  config: classpath:logback-spring.xml
+
+seata:
+  registry:
+    type: nacos
+    nacos:
+      application: seata-server
+      server-addr: nacos:8848     # compose 网络内 nacos 容器名
+      namespace: ""
+      group: SEATA_GROUP          # 与客户端 seata.registry.nacos.group 一致
+      cluster: default            # 与客户端 vgroup-mapping 的值一致
+      username: nacos
+      password: "${NACOS_PASSWORD:nacos}"   # 与 Nacos 服务端默认管理员一致
+  config:
+    # 不启用远程配置中心，本地 file
+    type: file
+  store:
+    mode: file
+    file:
+      dir: sessionStore
+  service:
+    vgroup-mapping:
+      lingmart_tx_group: default

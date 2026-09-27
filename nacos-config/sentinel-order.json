@@ -1,0 +1,5 @@
+[
+  {"resource": "createOrder", "grade": 1, "count": 20},
+  {"resource": "/api/order", "grade": 1, "count": 50},
+  {"resource": "/api/cart", "grade": 1, "count": 100}
+]

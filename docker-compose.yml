@@ -1,0 +1,155 @@
+# =============================================================
+# 轻营 · 基础设施编排
+# 启动：docker compose up -d
+# 包含：Nacos 2.4.x（注册中心）、MySQL 8（数据库）、Redis 7（缓存）、
+#       Elasticsearch 8.15（检索）、RabbitMQ 3.13（MQ）、Seata 2.5（分布式事务 TC）、
+#       ChromaDB（向量库，Agent 知识库）、Ollama（备用 AI profile，默认不启动）
+# 说明：MySQL 首次初始化会自动执行 sql/ 目录下的初始化脚本
+# =============================================================
+services:
+
+  # 服务注册与配置中心
+  nacos:
+    image: nacos/nacos-server:v2.4.3
+    container_name: lingmart-nacos
+    environment:
+      # 单机模式
+      - MODE=standalone
+      # 控制台访问凭据（Web 控制台默认账号密码：nacos / nacos，
+      # 各业务服务 application.yml 的 nacos 密码默认值已对齐为 nacos）
+      - NACOS_AUTH_ENABLE=true
+      # JWT 鉴权密钥：从项目根目录 .env 读取（base64，解码后需 ≥ 32 字节）
+      - NACOS_AUTH_TOKEN=${NACOS_AUTH_TOKEN}
+      - NACOS_AUTH_IDENTITY_KEY=${NACOS_AUTH_IDENTITY_KEY}
+      - NACOS_AUTH_IDENTITY_VALUE=${NACOS_AUTH_IDENTITY_VALUE}
+      - JVM_XMS=256m
+      - JVM_XMX=512m
+      - JVM_XMN=256m
+    ports:
+      - "8848:8848"   # HTTP 控制台与客户端请求
+      - "9848:9848"   # gRPC 主端口（客户端 -> 服务端，2.x 必需）
+      - "9849:9849"   # gRPC 内部通信端口
+    volumes:
+      # 挂载数据卷持久化 Nacos 内嵌 Derby：否则每次重建容器，控制台密码会重置回默认 nacos
+      - nacos-data:/home/nacos/data
+    restart: unless-stopped
+
+  # 业务数据库（各服务独立库）
+  mysql:
+    image: mysql:8.0
+    container_name: lingmart-mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "3307:3306"
+    volumes:
+      # 首次启动自动执行 sql/ 下的初始化脚本建库建表
+      - ./sql:/docker-entrypoint-initdb.d
+      - mysql-data:/var/lib/mysql
+    restart: unless-stopped
+
+  # 缓存 / 登录态存储
+  redis:
+    image: redis:7
+    container_name: lingmart-redis
+    ports:
+      - "6380:6379"   
+    restart: unless-stopped
+
+  # 商品全文检索（里程碑二：商品上架时写入；批7：改用内置 IK 中文分词的本地镜像）
+  elasticsearch:
+    # 镜像升级为基于 elasticsearch:8.15.5 + IK 分词插件的自定义镜像（见 docker/elasticsearch/Dockerfile）
+    build: ./docker/elasticsearch
+    image: lingmart-elasticsearch:8.15.5-ik
+    container_name: lingmart-elasticsearch
+    environment:
+      # 单节点模式 + 关闭安全认证（本地开发）
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms256m -Xmx256m
+    ports:
+      - "9201:9200"   # HTTP（+1 避免与本机冲突；product 服务 es.uris 指向 9201）
+      - "9301:9300"   # 节点间传输端口
+    restart: unless-stopped
+
+  # 消息队列（里程碑三：订单超时取消、异步解耦）
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: lingmart-rabbitmq
+    ports:
+      - "5672:5672"    # AMQP 协议端口
+      - "15672:15672"  # 管理台 Web UI（guest / guest）
+    restart: unless-stopped
+
+  # 链路追踪（Zipkin UI：http://localhost:9411）
+  # 随 `docker compose up -d` 默认启动，各服务 ZIPKIN_ENABLED 默认 true（共享配置），无需额外操作。
+  # 只想跑基础设施不上报：设 ZIPKIN_ENABLED=false，或用 docker compose up -d <服务名> 指名启动。
+  zipkin:
+    image: openzipkin/zipkin:3.4
+    container_name: lingmart-zipkin
+    ports:
+      - "9411:9411"
+    restart: unless-stopped
+
+  # 分布式事务协调器 TC（里程碑三：Seata 2.5.0 AT 模式）
+  # Seata 2.x 服务端用 application.yml（1.x 的 registry.conf/file.conf 已弃用），见 docker/seata/application.yml
+  seata-server:
+    image: apache/seata-server:2.5.0
+    container_name: lingmart-seata
+    environment:
+      - SEATA_PORT=8091
+      # TC 往注册中心登记的 IP（仅当客户端用 registry.type=nacos 时才会被读取）。
+      #
+      # ⚠️ 两个硬约束：
+      #   1) 必须是**真实 IPv4**，不能写域名——写 `host.docker.internal` 这类主机名会被 Seata 判为
+      #      非法并静默回退到容器内网 IP（官方 issue #3401），等于没设；
+      #   2) 不设时 TC 会自动探测，容器里探测到的是 Docker 内网地址（172.x），宿主机上的服务路由不到，
+      #      这就是 `register RM failed: can not connect to services-server` 的根因。
+      #
+      # 本项目客户端已默认改用「直连 grouplist」（registry.type=file，见各服务 application.yml），
+      # 所以**通常不需要设这个变量**：宿主机客户端连 127.0.0.1:8091（端口映射），容器客户端连
+      # seata-server:8091（compose 服务名）。仅当你显式切回 SEATA_REGISTRY_TYPE=nacos 时才需要它，
+      # 此时填本机局域网 IP（ipconfig 查），换网络/换机后要同步改。
+      - SEATA_IP=${SEATA_IP:-127.0.0.1}
+    ports:
+      - "8091:8091"
+    volumes:
+      - ./docker/seata/application.yml:/seata-server/resources/application.yml
+      - seata-session:/seata-server/sessionStore
+    restart: unless-stopped
+
+  # 向量数据库 ChromaDB（网页浮窗 Agent 的 RAG 知识库存储）
+  # lingmart-agent 容器经内网 http://chroma:8000 访问；宿主对外映射 18000，
+  # 避开 auth(8000) 与 Chroma 默认端口 8000 冲突（本地 java -jar 连 127.0.0.1:18000）
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: lingmart-chroma
+    ports:
+      - "18000:8000"
+    volumes:
+      - chroma-data:/data
+    restart: unless-stopped
+
+  # 本地 LLM Ollama（仅备用 profile：Agent 默认走第三方 OpenAI 兼容 API）
+  # 需要时启动：docker compose --profile ai up -d ollama，再在容器内拉模型：
+  #   docker exec lingmart-ollama ollama pull qwen2.5:7b
+  # lingmart-agent 切到 ollama：启动参数加 --spring.profiles.active=ollama
+  ollama:
+    image: ollama/ollama:latest
+    container_name: lingmart-ollama
+    profiles: ["ai"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  seata-session:
+  nacos-data:
+  chroma-data:
+  ollama-data:

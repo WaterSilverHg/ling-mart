@@ -1,0 +1,250 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.lingmart</groupId>
+    <artifactId>lingmart</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>lingmart</name>
+    <description>轻营（LingMart）C2C 交易平台 · 微服务父工程</description>
+    <packaging>pom</packaging>
+
+    <modules>
+        <module>lingmart-common</module>
+        <module>lingmart-gateway</module>
+        <module>lingmart-auth</module>
+        <module>lingmart-shop</module>
+        <module>lingmart-product</module>
+        <module>lingmart-ware</module>
+        <module>lingmart-order</module>
+        <module>lingmart-search</module>
+        <module>lingmart-chat</module>
+        <module>lingmart-agent</module>
+    </modules>
+
+    <properties>
+        <!-- 基础语言与编码 -->
+        <java.version>21</java.version>
+        <maven.compiler.release>21</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!-- 2026 年稳定技术基线（三者官方对齐，避免版本冲突） -->
+        <spring-boot.version>3.5.16</spring-boot.version>
+        <spring-cloud.version>2025.0.3</spring-cloud.version>
+        <spring-cloud-alibaba.version>2025.0.0.0</spring-cloud-alibaba.version>
+
+        <!-- 持久层与鉴权 -->
+        <mybatis-plus.version>3.5.9</mybatis-plus.version>
+        <jjwt.version>0.12.6</jjwt.version>
+        <!-- Lombok 版本：BOM 的属性不会随 import 继承，必须在本工程显式定义，
+             供 annotationProcessorPaths 使用（与 spring-boot-dependencies 保持一致） -->
+        <lombok.version>1.18.46</lombok.version>
+        <!-- OpenAPI 文档（Apifox / Swagger 导入） -->
+        <springdoc.version>2.8.17</springdoc.version>
+        <!-- 分布式事务：Seata 2.5.0（与 Spring Cloud Alibaba 2025.0.0.0 官方对齐版本） -->
+        <seata.version>2.5.0</seata.version>
+        <!-- Spring AI 1.1.x：与 Spring Boot 3.5.x 官方对齐线（lingmart-agent 网页浮窗 Agent 使用）
+             1.1.8 已实测可从阿里云镜像拉取 -->
+        <spring-ai.version>1.1.8</spring-ai.version>
+
+        <!-- Mockito 版本：同上，BOM 的属性不会随 import 继承，此处显式定义供 surefire 的
+             -javaagent 拼接 jar 路径使用（与 spring-boot-dependencies 的 mockito.version 一致）。
+             升级 Spring Boot 时需同步核对此处，否则 agent 路径指向不存在的 jar。 -->
+        <mockito.version>5.17.0</mockito.version>
+    </properties>
+
+    <!-- 统一依赖版本管理：子模块无需再写版本号 -->
+    <dependencyManagement>
+        <dependencies>
+            <!-- Spring Boot 依赖管理（3.x） -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- Spring Cloud 依赖管理（2024.x） -->
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- Spring Cloud Alibaba 依赖管理（Nacos / Sentinel / Seata） -->
+            <dependency>
+                <groupId>com.alibaba.cloud</groupId>
+                <artifactId>spring-cloud-alibaba-dependencies</artifactId>
+                <version>${spring-cloud-alibaba.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- Spring AI 依赖管理（lingmart-agent 使用；1.1.x 对应 Spring Boot 3.5.x，勿混用 2.x） -->
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>${spring-ai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- 内部模块 -->
+            <dependency>
+                <groupId>com.lingmart</groupId>
+                <artifactId>lingmart-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <!-- 内部模块：lingmart-ware（order 端到端集成测试 test 依赖需要版本管理） -->
+            <dependency>
+                <groupId>com.lingmart</groupId>
+                <artifactId>lingmart-ware</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <!-- MyBatis-Plus（适配 Spring Boot 3 的 starter） -->
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+            <!-- MyBatis-Plus 3.5.6+ 将分页插件拆分为独立模块（PaginationInnerInterceptor 所在） -->
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-jsqlparser</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+
+            <!-- Elasticsearch Java Client -->
+            <dependency>
+                <groupId>co.elastic.clients</groupId>
+                <artifactId>elasticsearch-java</artifactId>
+                <version>8.15.5</version>
+            </dependency>
+            <dependency>
+                <groupId>jakarta.json</groupId>
+                <artifactId>jakarta.json-api</artifactId>
+                <version>2.1.2</version>
+            </dependency>
+            <!-- JJWT 0.12.x：新链式 API，支持 jakarta 与 java.time -->
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-api</artifactId>
+                <version>${jjwt.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-impl</artifactId>
+                <version>${jjwt.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-jackson</artifactId>
+                <version>${jjwt.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+
+            <!-- OpenAPI 文档（springdoc）：MVC 版给普通服务，WebFlux 版给响应式网关 -->
+            <dependency>
+                <groupId>org.springdoc</groupId>
+                <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+                <version>${springdoc.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springdoc</groupId>
+                <artifactId>springdoc-openapi-starter-webflux-ui</artifactId>
+                <version>${springdoc.version}</version>
+            </dependency>
+
+            <!-- Excel 导出（订单导出）：阿里 EasyExcel 4.x，基于 POI 5，兼容 Boot 3.5 / JDK21 -->
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>easyexcel</artifactId>
+                <version>4.0.3</version>
+            </dependency>
+            <!-- Seata 分布式事务客户端：Seata 2.5 起由 io.seata 迁至 Apache 坐标 org.apache.seata
+                 （SCA 2025.0.0.0 的 spring-cloud-starter-alibaba-seata 亦依赖此坐标） -->
+            <dependency>
+                <groupId>org.apache.seata</groupId>
+                <artifactId>seata-spring-boot-starter</artifactId>
+                <version>${seata.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <!-- 全模块共享的测试依赖。
+         mockito-core 在此声明只有一个目的：保证它的 jar 在任何模块跑 surefire 之前就已经落到本地仓库。
+         原因：下面 surefire 用 -javaagent 指向 mockito-core 的 jar（消除 JDK21+ 的自附加警告，
+         见 MockMaker 的 Premain-Class），而 lingmart-common 是模块列表里的第一个、且**没有**引入
+         spring-boot-starter-test（它只用 junit-jupiter）。若不在父 POM 声明，干净环境首次
+         `mvn test` 时 common 先构建 → agent jar 尚未下载 → fork 出的测试 JVM 启动即失败
+         （报 "Error opening zip file or JAR manifest missing"）。其余模块本就经 starter-test 传递引入。 -->
+    <dependencies>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <!-- 各子模块统一构建插件（不继承 spring-boot-starter-parent，故在此固定版本） -->
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-maven-plugin</artifactId>
+                    <version>${spring-boot.version}</version>
+                    <executions>
+                        <!-- 打包阶段生成可执行 fat jar（不继承 spring-boot-starter-parent，
+                             故需在此显式声明 repackage 绑定） -->
+                        <execution>
+                            <id>repackage</id>
+                            <goals>
+                                <goal>repackage</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>3.5.4</version>
+                    <configuration>
+                        <!-- 用 -javaagent 加载 mockito-core，消除 JDK 21+ 的
+                             "Mockito is currently self-attaching to enable the inline-mock-maker" 警告。
+                             mockito-core 的 manifest 带 Premain-Class（org.mockito.internal.PremainAttach），
+                             故该 jar 本身即可作为 agent；版本号取自模块 mockito.version，与 BOM 保持一致。
+                             注意：路径不能含空格（本机 .m2 默认路径不含，符合预期）。 -->
+                        <argLine>-javaagent:${settings.localRepository}/org/mockito/mockito-core/${mockito.version}/mockito-core-${mockito.version}.jar</argLine>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>3.13.0</version>
+                    <configuration>
+                        <release>${maven.compiler.release}</release>
+                        <encoding>${project.build.sourceEncoding}</encoding>
+                        <!-- 编译时保留方法参数名（-parameters）。自定义父 POM 未继承
+                             spring-boot-starter-parent，默认不开启；缺失时 Spring MVC 无法
+                             解析未显式命名的 @PathVariable / @RequestParam / @RequestHeader
+                             参数，运行期抛 IllegalArgumentException 导致 500。 -->
+                        <parameters>true</parameters>
+                        <!-- 显式声明 Lombok 注解处理器路径（maven-compiler-plugin 3.13+
+                             默认不从编译 classpath 自动发现处理器，需显式配置） -->
+                        <annotationProcessorPaths>
+                            <path>
+                                <groupId>org.projectlombok</groupId>
+                                <artifactId>lombok</artifactId>
+                                <version>${lombok.version}</version>
+                            </path>
+                        </annotationProcessorPaths>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>
