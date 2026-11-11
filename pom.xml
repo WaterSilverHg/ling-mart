@@ -48,6 +48,10 @@
              1.1.8 已实测可从阿里云镜像拉取 -->
         <spring-ai.version>1.1.8</spring-ai.version>
 
+        <!-- Apache POI：读取用户上传的 .xlsx / .docx（lingmart-agent 解析开店材料）。
+             版本与 easyexcel 4.0.3 传递引入的 POI 保持一致，避免同一模块内出现两份 POI -->
+        <poi.version>5.2.5</poi.version>
+
         <!-- Mockito 版本：同上，BOM 的属性不会随 import 继承，此处显式定义供 surefire 的
              -javaagent 拼接 jar 路径使用（与 spring-boot-dependencies 的 mockito.version 一致）。
              升级 Spring Boot 时需同步核对此处，否则 agent 路径指向不存在的 jar。 -->
@@ -88,6 +92,22 @@
                 <version>${spring-ai.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+
+            <!-- Nacos 客户端版本对齐（重要）：
+                 SCA 2025.0.0.0 传递进来的是 nacos-client 3.0.3，而本项目 Nacos 服务端是 2.4.3。
+                 跨大版本时 gRPC 的 ConfigQuery 会被服务端当成「配置不存在」返回空，客户端**不报错**，
+                 只在启动日志里留一行 WARN：
+                   [Nacos Config] config[dataId=lingmart-common.yaml, group=DEFAULT_GROUP] is empty
+                 后果是共享配置静默失效（management 端点暴露、MyBatis-Plus 通用配置等都拿不到），
+                 spring.config.import 的 optional: 前缀又把它吞掉了，因此极难发现。
+                 实测：nacos-client 3.0.3 读该服务端返回 null；2.5.1 可正常读到内容。
+                 另已逐个核对 SCA 2025.0.0.0 引用的 27 个 com.alibaba.nacos.* 类在 2.5.1 中均存在。
+                 服务端升级到 3.x 前，请勿移除这条固定版本。 -->
+            <dependency>
+                <groupId>com.alibaba.nacos</groupId>
+                <artifactId>nacos-client</artifactId>
+                <version>2.5.1</version>
             </dependency>
 
             <!-- 内部模块 -->
@@ -163,6 +183,14 @@
                 <groupId>com.alibaba</groupId>
                 <artifactId>easyexcel</artifactId>
                 <version>4.0.3</version>
+            </dependency>
+            <!-- Excel/Word 读取（Agent 解析用户上传的开店材料）：
+                 xlsx 用 XSSFWorkbook + DataFormatter 直接取"显示值"，docx 用 XWPFDocument；
+                 两者都在 poi-ooxml 内，故只声明这一个坐标即可 -->
+            <dependency>
+                <groupId>org.apache.poi</groupId>
+                <artifactId>poi-ooxml</artifactId>
+                <version>${poi.version}</version>
             </dependency>
             <!-- Seata 分布式事务客户端：Seata 2.5 起由 io.seata 迁至 Apache 坐标 org.apache.seata
                  （SCA 2025.0.0.0 的 spring-cloud-starter-alibaba-seata 亦依赖此坐标） -->
@@ -247,4 +275,39 @@
             </plugins>
         </pluginManagement>
     </build>
+
+    <profiles>
+        <!--
+          依赖漏洞扫描（不参与日常构建，显式启用才跑）：
+            mvn -Psecurity-scan verify -DskipTests
+          首次运行会下载 NVD 数据库（几百 MB，较慢）；有 NVD API Key 时建议设置环境变量
+          NVD_API_KEY 以显著提速。CVSS ≥ 7 会让构建失败，误报登记在
+          dependency-check-suppressions.xml（必须写明原因与复核时间）。
+        -->
+        <profile>
+            <id>security-scan</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.owasp</groupId>
+                        <artifactId>dependency-check-maven</artifactId>
+                        <version>12.2.2</version>
+                        <configuration>
+                            <failBuildOnCVSS>7</failBuildOnCVSS>
+                            <suppressionFiles>
+                                <suppressionFile>${maven.multiModuleProjectDirectory}/dependency-check-suppressions.xml</suppressionFile>
+                            </suppressionFiles>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>check</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

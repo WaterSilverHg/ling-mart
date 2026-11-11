@@ -5,7 +5,7 @@
          :style="boxStyle" :class="{ 'cp-open': open }">
       <!-- 悬浮按钮（折叠态）：pointerdown 起拖拽，click 展开（拖拽后不触发展开） -->
       <div v-if="!open" class="cp-fab" title="轻营助手 Copilot"
-           @pointerdown="startDrag($event, 44, 44)" @click="onFabClick">
+           @pointerdown="startDrag($event, 44, 44, true)" @click="onFabClick">
         <span class="cp-fab-icon">🤖</span>
         <span v-if="unread > 0" class="cp-badge">{{ unread > 99 ? '99+' : unread }}</span>
       </div>
@@ -38,7 +38,11 @@
           </div>
           <template v-for="m in messages" :key="m.id">
             <div v-if="m.role === 'user'" class="cp-row cp-row-user">
-              <div class="cp-bubble cp-user">{{ m.content }}</div>
+              <div class="cp-bubble cp-user">
+                <!-- 附件要留在气泡里：用户回头看不到"这条消息带了文件"的话，
+                     就无从理解助手当时为什么会说出一串商品明细 -->
+                <div v-if="m.fileName" class="cp-user-file">📎 {{ m.fileName }}</div>{{ m.content }}
+              </div>
             </div>
             <div v-else class="cp-row cp-row-ai">
               <div class="cp-bubble cp-ai" :class="{ 'cp-ai-error': m.error }">
@@ -60,8 +64,34 @@
                     </template>
                     <template v-else>
                       <div class="cp-tool-purpose">{{ t.purpose }}</div>
+                      <!-- 预填卡片：把解析明细摊开给用户看。用户是看着"这几条商品的标题与价格"点确认的，
+                           而不是看着一句笼统的"确认执行"——这也是它比通用填表安全的关键一环 -->
+                      <div v-if="t.preview" class="cp-prefill">
+                        <div v-if="t.preview.shopName" class="cp-prefill-shop">
+                          店铺名：<b>{{ t.preview.shopName }}</b>
+                        </div>
+                        <div class="cp-prefill-count">
+                          商品 {{ t.preview.total }} 条<span v-if="t.preview.hidden > 0">（下方仅列前 {{ t.preview.rows.length }} 行）</span>
+                        </div>
+                        <table class="cp-prefill-table">
+                          <thead><tr><th>商品</th><th>规格</th><th>价格</th><th>数量</th></tr></thead>
+                          <tbody>
+                            <tr v-for="(p, pi) in t.preview.rows" :key="pi">
+                              <td>{{ p.title }}</td>
+                              <td>{{ p.skuTitle }}</td>
+                              <td>{{ p.price }}</td>
+                              <td>{{ p.qty }}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                        <div v-if="t.preview.incomplete > 0" class="cp-prefill-warn">
+                          ⚠️ 其中 {{ t.preview.incomplete }} 条信息不全（缺标题、规格名或价格），需你补全后才能提交
+                        </div>
+                      </div>
                       <div v-if="t.status === 'pending'" class="cp-tool-btns">
-                        <button class="cp-btn cp-btn-primary" :disabled="sending" @click="confirmTool(t)">确认执行</button>
+                        <button class="cp-btn cp-btn-primary" :disabled="sending" @click="confirmTool(t)">
+                          {{ t.action === 'prefill' ? '填入表单' : '确认执行' }}
+                        </button>
                         <button class="cp-btn" :disabled="sending" @click="cancelTool(t)">取消</button>
                       </div>
                       <div v-else class="cp-tool-result">{{ t.resultMessage }}</div>
@@ -75,19 +105,39 @@
 
         <!-- 输入区 -->
         <div class="cp-inputbar">
-          <textarea
-            v-model="inputText"
-            class="cp-input"
-            :disabled="sending"
-            rows="1"
-            placeholder="输入你的问题，Enter 发送"
-            @keydown.enter.exact.prevent="send"
-          />
-          <!-- 发送中显示「停止」：只读查询免确认、由服务端连查数次，一轮可能耗时较长，用户必须能中途叫停 -->
-          <button v-if="sending" class="cp-send cp-stop" @click="stopStream">停止</button>
-          <button v-else class="cp-send" :disabled="!inputText.trim()" @click="send">发送</button>
+          <!-- 已选文档：只显示一条附件，正文留在服务端（发送时凭 documentId 引用）。
+               早先是把解析结果直接灌进输入框——既淹没了输入框，稍大的清单还会撞上服务端的
+               消息长度上限（2000 字）而直接发不出去 -->
+          <div v-if="attachment" class="cp-chip" :class="{ 'cp-chip-busy': attachment.uploading }">
+            <span class="cp-chip-icon">📎</span>
+            <span class="cp-chip-name" :title="attachment.name">{{ attachment.name }}</span>
+            <span v-if="attachment.uploading" class="cp-spin"></span>
+            <span v-else class="cp-chip-meta">
+              {{ attachment.summary }}<template v-if="attachment.truncated">（内容过长已截断，建议分批）</template>
+            </span>
+            <button class="cp-chip-x" :disabled="sending" title="移除" @click="removeAttachment">✕</button>
+          </div>
+          <div class="cp-inputrow">
+            <button class="cp-attach" :disabled="sending || uploading" title="上传开店材料（CSV / Excel / Word / 文本）"
+                    @click="pickFile">📎</button>
+            <input ref="fileInput" type="file" accept=".csv,.txt,.md,.xlsx,.docx" class="cp-file-input" @change="onFileChange" />
+            <textarea
+              v-model="inputText"
+              class="cp-input"
+              :disabled="sending"
+              rows="1"
+              placeholder="输入你的问题，Enter 发送"
+              @keydown.enter.exact.prevent="send"
+            />
+            <!-- 发送中显示「停止」：只读查询免确认、由服务端连查数次，一轮可能耗时较长，用户必须能中途叫停 -->
+            <button v-if="sending" class="cp-send cp-stop" @click="stopStream">停止</button>
+            <button v-else class="cp-send" :disabled="!canSend" @click="send">发送</button>
+          </div>
         </div>
-        <div class="cp-hint">助手不会代填敏感信息；涉及跳转/点击会先经你确认，查询类操作会自动执行</div>
+        <div class="cp-hint">
+          下单 / 支付 / 密码等敏感操作不代填；<b>开店申请</b>可由你上传的清单预填草稿，<b>提交仍需你自己点</b>。
+          跳转与点击会先经你确认，查询类会自动执行
+        </div>
       </div>
     </div>
   </Teleport>
@@ -98,7 +148,9 @@ import { ref, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '../../store/auth'
+import { useCopilotPrefillStore } from '../../store/copilotPrefill'
 import request from '../../api/request'
+import { agentDocApi } from '../../api'
 import { postAgentChat } from './agentSse'
 import { executeDomAction, probeElementText } from './domExecutor'
 import { buildPageContext, uid } from './usePageContext'
@@ -106,11 +158,15 @@ import { renderMarkdown } from './markdownRender'
 import { isTokenExpired, clearLocalAuth } from '../../utils/authToken'
 
 const authStore = useAuthStore()
+const prefillStore = useCopilotPrefillStore()
 const route = useRoute()
 const router = useRouter()
 
 const SESSION_KEY = 'copilot-session-id'
 const POS_KEY = 'copilot-widget-pos'
+
+/** 预填卡片里最多列几行明细（多了卡片会过长，用户也没法一次核对） */
+const MAX_PREFILL_PREVIEW = 8
 
 // 纯净页（登录/注册）由 App.vue 保证不挂载，这里再加一层兜底
 const enabled = computed(() => route.meta.layout !== 'blank')
@@ -297,9 +353,80 @@ function isToolPlaceholder(content) {
   return !!content && (content.indexOf('（等待你确认）') !== -1 || content.indexOf('我准备执行页面操作') === 0)
 }
 
+// ============ 上传开店材料（v0.29） ============
+
+/**
+ * 前端侧的文件大小上限，与服务端 `lingmart.agent.document.max-file-size` 一致。
+ * 这里只是"快速失败"的体验优化——**权威判定在服务端**，改服务端配置时这里要跟着改。
+ */
+const MAX_DOC_BYTES = 2 * 1024 * 1024
+
+const fileInput = ref(null)
+
+/** 附件状态：null=无；`{uploading:true, name}`=上传中；否则是服务端返回的元信息（含 documentId） */
+const attachment = ref(null)
+
+/** 上传中：此时附件的 documentId 还不存在，发送按钮要禁用 */
+const uploading = computed(() => !!attachment.value?.uploading)
+
+/** 可否发送：有文字或有已就绪的附件即可（只传文件不打字也应能发出去） */
+const canSend = computed(() => !sending.value && (!!inputText.value.trim() || !!attachment.value?.documentId))
+
+function pickFile() {
+  if (sending.value || uploading.value) {
+    return
+  }
+  fileInput.value?.click()
+}
+
+function removeAttachment() {
+  attachment.value = null
+}
+
+/**
+ * 选文件 → 上传到 Agent 服务 → 只记下元信息，**不把正文放进输入框**。
+ *
+ * <p>正文留在服务端，发送时凭 documentId 引用。这样长的清单不会挤占输入框，
+ * 也不会因为超过 `max-message-length`（2000 字）而被服务端整轮拒绝。</p>
+ *
+ * <p>不自动发送：用户应当先看一眼传上去的是什么（文件名 + 解析摘要），确认没传错再发。</p>
+ */
+async function onFileChange(e) {
+  const file = e.target.files && e.target.files[0]
+  // 清掉 value，否则连续选同一个文件不会再触发 change
+  e.target.value = ''
+  if (!file) {
+    return
+  }
+  if (!authStore.isLogin) {
+    ElMessage.warning('请先登录后再上传')
+    return
+  }
+  if (file.size > MAX_DOC_BYTES) {
+    ElMessage.error(`文件不能超过 ${Math.round(MAX_DOC_BYTES / 1024 / 1024)}MB`)
+    return
+  }
+  // 文档要挂在这个会话下，sessionId 为空服务端会拒绝；它可能需要一次网络往返解析出来
+  await ensureSessionId()
+  attachment.value = { uploading: true, name: file.name }
+  try {
+    const info = await agentDocApi.upload(file, sessionId.value)
+    attachment.value = info
+    ElMessage.success(`已上传「${info.name}」（${info.summary}），点「发送」交给助手`)
+  } catch (err) {
+    // 失败不保留半成品状态：留着一条"看起来传上去了"的附件比没有更糟
+    attachment.value = null
+    // 错误提示由 axios 拦截器统一弹出
+  }
+}
+
 async function send() {
-  const text = inputText.value.trim()
-  if (!text || sending.value) {
+  const typed = inputText.value.trim()
+  if (sending.value || uploading.value) {
+    return
+  }
+  const doc = attachment.value?.documentId ? attachment.value : null
+  if (!typed && !doc) {
     return
   }
   if (!authStore.isLogin) {
@@ -311,13 +438,25 @@ async function send() {
   // 服务端会自己 UUID.randomUUID() 落盘，而前端永远不知道那个 ID——
   // 这一轮的历史刷新后就丢了；若它下发了确认卡片，刷新后 /pending 也查不到，点它会命中 receipt_rejected。
   await ensureSessionId()
+  // 只传了文件、没打字时补一句话：服务端会因为"消息为空"直接拒绝这一轮。
+  // 这句话会显示在用户自己的气泡里（不是背着用户发的内容），所以他看得见自己发了什么。
+  const text = typed || '请根据我上传的文档帮我预填开店申请'
   inputText.value = ''
-  pushMessage('user', text)
-  stream(text, [])
+  pushMessage('user', text, undefined, false, doc ? doc.name : '')
+  // 发送时只带 documentId，正文由服务端从会话里取——消息体因此永远很短
+  const ok = await stream(text, [], doc ? doc.documentId : '')
+  // 只有这一轮真的跑完才清掉附件：发送失败时留着，用户可以原样重发，不必重新上传
+  if (ok && attachment.value === doc) {
+    attachment.value = null
+  }
 }
 
-/** 发起一轮 Agent 流式请求，结果渲染为一条新的 assistant 消息。 */
-async function stream(text, toolResults) {
+/**
+ * 发起一轮 Agent 流式请求，结果渲染为一条新的 assistant 消息。
+ *
+ * @returns {Promise<boolean>} 本轮是否正常收到 message_end（发送失败/被中止为 false）
+ */
+async function stream(text, toolResults, documentId = '') {
   sending.value = true
   const id = uid()
   pushMessage('assistant', '', id, true)
@@ -333,7 +472,8 @@ async function stream(text, toolResults) {
         message: text,
         sessionId: sessionId.value,
         context: buildPageContext(route.path),
-        toolResults: toolResults || []
+        toolResults: toolResults || [],
+        documentId: documentId || ''
       },
       {
         onDelta: (delta) => appendAssistant(id, delta),
@@ -357,6 +497,8 @@ async function stream(text, toolResults) {
     }
     nextTick(scrollBottom)
   }
+  // 交给调用方判断"这一轮到底成没成"：send() 据此决定要不要清掉附件
+  return ended
 }
 
 /** 用户点击「停止」：中断当前 SSE 请求。只读查询无副作用，中断不会留下脏状态。 */
@@ -367,8 +509,14 @@ function stopStream() {
   }
 }
 
-function pushMessage(role, content, id = uid(), streaming = false) {
-  messages.value.push({ id, role, content, tools: [], streaming, error: false })
+/**
+ * 追加一条消息。
+ *
+ * @param {string} fileName 该条用户消息附带的文档名（仅用于在气泡里标出"这条带了文件"）——
+ *                         只在本次会话内有效：上传的文档不进会话历史，刷新后拿不到
+ */
+function pushMessage(role, content, id = uid(), streaming = false, fileName = '') {
+  messages.value.push({ id, role, content, tools: [], streaming, error: false, fileName })
   nextTick(scrollBottom)
 }
 
@@ -380,6 +528,41 @@ function appendAssistant(id, delta) {
   const m = findAssistant(id)
   if (m) {
     m.content += delta
+  }
+}
+
+/**
+ * 把预填草稿摊成卡片上可读的明细（v0.28）。
+ *
+ * 卡片**必须展示具体内容**：用户是看着"这几条商品的标题与价格"点确认的。
+ * 只写一句「确认执行」的话，用户就失去了核对的机会——而那正是这条能力比通用填表安全的地方。
+ */
+function buildPrefillPreview(args) {
+  const draft = (args && args.draft) || {}
+  const products = Array.isArray(draft.products) ? draft.products : []
+  const rows = []
+  let incomplete = 0
+  products.forEach((p) => {
+    const skus = Array.isArray(p.skus) && p.skus.length ? p.skus : [{}]
+    const hasPrice = skus.some((s) => s && s.title && Number(s.price) > 0)
+    if (!p.title || !hasPrice) {
+      incomplete++
+    }
+    skus.forEach((s) => {
+      rows.push({
+        title: p.title || '（缺标题）',
+        skuTitle: (s && s.title) || '（缺规格名）',
+        price: s && s.price != null && s.price !== '' ? `¥${s.price}` : '（缺价格）',
+        qty: s && s.qty != null && s.qty !== '' ? s.qty : '不限量'
+      })
+    })
+  })
+  return {
+    shopName: draft.shopName || '',
+    total: products.length,
+    incomplete,
+    rows: rows.slice(0, MAX_PREFILL_PREVIEW),
+    hidden: Math.max(0, rows.length - MAX_PREFILL_PREVIEW)
   }
 }
 
@@ -395,6 +578,9 @@ function pushTool(id, tool) {
     return
   }
   const t = { ...tool, status: 'pending', resultMessage: '' }
+  if (t.action === 'prefill') {
+    t.preview = buildPrefillPreview(t.arguments)
+  }
   m.tools.push(t)
   // 卡片一渲染就为 click 目标打“当前 DOM 指纹”：用户点确认那一瞬的页面与此刻不同即拒点
   // （ID 保证点的是同一个节点，但不保证内容没变，故指纹校验不能省）
@@ -493,16 +679,23 @@ async function confirmTool(tool) {
     return
   }
   tool.status = 'running'
-  // 用“渲染卡片瞬间”打的 DOM 指纹做执行校验（优先），无则退回模型给出的 elementText；都不带则按旧行为执行
-  const execArgs = { ...(tool.arguments || {}) }
-  if (tool.fp) {
-    execArgs.elementText = tool.fp
+  let result
+  if (tool.action === 'prefill') {
+    // 预填**不走 DOM 执行器**：它不写任何页面元素，而是把结构化草稿交给开店申请页自己去填。
+    // 页面填完后用户仍可编辑，且**提交必须由用户自己点**——这条边界是这套设计的安全地基。
+    result = await applyPrefill(tool)
+  } else {
+    // 用“渲染卡片瞬间”打的 DOM 指纹做执行校验（优先），无则退回模型给出的 elementText；都不带则按旧行为执行
+    const execArgs = { ...(tool.arguments || {}) }
+    if (tool.fp) {
+      execArgs.elementText = tool.fp
+    }
+    result = await executeDomAction(tool.action, execArgs, router)
   }
-  const result = await executeDomAction(tool.action, execArgs, router)
   tool.status = result.success ? 'done' : 'error'
   tool.resultMessage = result.message
-  // 导航类操作可能刚切换路由，等页面就绪再采集上下文续跑
-  const wait = result.success && tool.action === 'navigate' ? 400 : 80
+  // 导航与预填都可能刚切换路由，等页面就绪再采集上下文续跑
+  const wait = result.success && (tool.action === 'navigate' || tool.action === 'prefill') ? 400 : 80
   await new Promise((r) => setTimeout(r, wait))
   // nonce 必须原样回传：服务端据此确认该回执确实对应当前挂起的意图（未命中一律不采信）
   // outcome 显式声明是"确认"：审计要能区分"用户主动取消"与"用户确认但执行失败"——两者都是 success=false
@@ -516,6 +709,31 @@ async function confirmTool(tool) {
       outcome: 'confirm'
     }
   ])
+}
+
+/**
+ * 把预填草稿交给开店申请页（v0.28）。
+ *
+ * <p>用 store 中转而不是派发 window 事件：用户点【填入表单】时可能并不在 `/shop/apply`，
+ * 需要先跳转——事件会在目标页挂载之前丢掉。目标页用 `watch(..., { immediate: true })` 消费，
+ * 因此"已经在申请页"与"跳转过去"两种情况都能接住。</p>
+ */
+async function applyPrefill(tool) {
+  const draft = tool.arguments && tool.arguments.draft
+  if (!draft || !Array.isArray(draft.products) || draft.products.length === 0) {
+    return { success: false, message: '草稿里没有商品条目，无法填入' }
+  }
+  const alreadyThere = route.path === '/shop/apply'
+  prefillStore.put(draft)
+  if (!alreadyThere) {
+    await router.push('/shop/apply')
+  }
+  return {
+    success: true,
+    message: alreadyThere
+      ? '已填入申请表单，请核对内容后自己点提交'
+      : '已跳转到申请开店页并填入草稿，请核对内容后自己点提交'
+  }
 }
 
 /** 用户点击【取消】：把拒绝原因回传 Agent。 */
@@ -548,6 +766,9 @@ function toolDesc(t) {
   if (t.action === 'click') {
     return '点击页面元素'
   }
+  if (t.action === 'prefill') {
+    return '预填开店申请'
+  }
   return `操作（${t.name || t.action}）`
 }
 
@@ -568,6 +789,9 @@ async function confirmClear() {
   }
   messages.value = []
   greeted.value = false
+  // 附件一并清掉：服务端在清空会话时已删除那份文档，留着附件条会指向一个不存在的 documentId
+  // （发送后表现为"助手看不到材料"，且没有任何提示）
+  attachment.value = null
   nextTick(scrollBottom)
 }
 
@@ -590,11 +814,32 @@ function readPos() {
 /** 拖拽是否发生了实际位移（>5px），用于区分“点击”与“拖动” */
 let dragMoved = false
 
-function startDrag(e, w, h) {
+/**
+ * 开始拖拽。
+ *
+ * @param {PointerEvent} e
+ * @param {number} w 面板宽度（用于边界收敛）
+ * @param {number} h 面板高度
+ * @param {boolean} trackClick 是否记录“拖过”标记供随后的 click 判定（**只有悬浮球需要**）
+ */
+function startDrag(e, w, h, trackClick = false) {
   if (e.pointerType === 'touch') {
     return // 触屏不拖拽（移动端为全屏面板）
   }
-  dragMoved = false
+  // 面板内的按钮不参与拖拽：只要在这里 setPointerCapture，浏览器就会把随后的 click
+  // 改派到「pointerdown 目标」与「捕获元素」的最近公共祖先（对头部按钮而言即 .cp-head），
+  // 按钮自己的 click 监听器再也收不到——表现就是「点收起/清空没反应」，加 @click.stop 也救不了
+  // （事件根本没派发到按钮）。在这里统一拦，而不是给每个按钮加 @pointerdown.stop，
+  // 以后往头部新增按钮会自动被覆盖。
+  if (e.target?.closest?.('button')) {
+    return
+  }
+  // 只有悬浮球需要在拖拽后抑制随后的 click（“拖动不展开”）。
+  // 面板头部没有 click 语义，绝不能写这个标记：否则拖过面板头部、再收起浮窗之后，
+  // 第一次点悬浮球会被当成“拖拽后的点击”而吞掉，要点两次才展开。
+  if (trackClick) {
+    dragMoved = false
+  }
   const startX = e.clientX
   const startY = e.clientY
   // 捕获指针：把后续 pointer 事件（含在窗口外松开的 pointerup）都定向到这个元素。
@@ -607,12 +852,14 @@ function startDrag(e, w, h) {
   }
   const base = pos.value || rectOf(e.currentTarget)
   const moved = (ev) => {
-    if (Math.abs(ev.clientX - startX) > 5 || Math.abs(ev.clientY - startY) > 5) {
+    const dx = ev.clientX - startX
+    const dy = ev.clientY - startY
+    if (trackClick && !dragMoved && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
       dragMoved = true
     }
     pos.value = {
-      x: clamp(base.x + (ev.clientX - startX), 4, window.innerWidth - w - 4),
-      y: clamp(base.y + (ev.clientY - startY), 4, window.innerHeight - h - 4)
+      x: clamp(base.x + dx, 4, window.innerWidth - w - 4),
+      y: clamp(base.y + dy, 4, window.innerHeight - h - 4)
     }
   }
   const up = () => {
@@ -813,6 +1060,13 @@ function clamp(v, min, max) {
   border-top-right-radius: 3px;
   white-space: pre-wrap;
 }
+/* 气泡里的附件行：让用户回头能看出"这条消息带了文件" */
+.cp-user-file {
+  font-size: 12px;
+  opacity: 0.9;
+  margin-bottom: 2px;
+  word-break: break-all;
+}
 .cp-ai {
   background: #fff;
   border: 1px solid #e8ecf1;
@@ -907,6 +1161,33 @@ function clamp(v, min, max) {
   display: flex;
   gap: 8px;
 }
+/* 预填卡片：把解析明细摊开——用户是看着具体内容点确认的，不是看着一句笼统的「确认执行」 */
+.cp-prefill {
+  margin-top: 8px;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  padding: 8px;
+  background: #fafbfc;
+  font-size: 12px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.cp-prefill-shop { margin-bottom: 4px; }
+.cp-prefill-count { color: #909399; margin-bottom: 6px; }
+.cp-prefill-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.cp-prefill-table th {
+  text-align: left;
+  color: #909399;
+  font-weight: 500;
+  border-bottom: 1px solid #ebeef5;
+  padding: 2px 4px;
+}
+.cp-prefill-table td {
+  padding: 2px 4px;
+  border-bottom: 1px dashed #f2f6fc;
+  word-break: break-all;
+}
+.cp-prefill-warn { margin-top: 6px; color: #e6a23c; }
 .cp-tool-result {
   margin-top: 6px;
   font-size: 12px;
@@ -954,13 +1235,83 @@ function clamp(v, min, max) {
   }
 }
 
-/* 输入区 */
+/* 输入区：纵向两段——附件条在上、操作行在下 */
 .cp-inputbar {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   padding: 8px 12px;
   border-top: 1px solid #e4e7ed;
+}
+.cp-inputrow {
+  display: flex;
+  gap: 8px;
   align-items: flex-end;
+}
+/* 已选附件：一条窄条，不该抢输入区的视觉权重（它是"材料已就位"的状态，不是主操作） */
+.cp-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #606266;
+  background: #f4f7fb;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+.cp-chip-busy {
+  opacity: 0.7;
+}
+.cp-chip-name {
+  font-weight: 600;
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cp-chip-meta {
+  color: #909399;
+  font-size: 11px;
+}
+.cp-chip-x {
+  border: none;
+  background: transparent;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.cp-chip-x:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: #f56c6c;
+}
+.cp-chip-x:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* 上传清单按钮：与发送按钮同高但弱化——它是辅助入口，不该和主操作抢视觉权重 */
+.cp-attach {
+  border: 1px solid #dcdfe6;
+  background: #fff;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 14px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.cp-attach:hover {
+  border-color: #409eff;
+}
+.cp-attach:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+/* 真正的 file input 藏起来（由上面的按钮代为触发），但必须留在 DOM 里才能 click() */
+.cp-file-input {
+  display: none;
 }
 .cp-input {
   flex: 1;

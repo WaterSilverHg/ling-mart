@@ -5,6 +5,8 @@ import com.alibaba.csp.sentinel.slots.block.BlockException;
 import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRule;
 import com.alibaba.csp.sentinel.slots.block.flow.FlowRule;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.baomidou.mybatisplus.core.toolkit.support.SFunction;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,15 +24,18 @@ import com.lingmart.order.config.RabbitMqConfig;
 import com.lingmart.order.dto.OrderCreateDTO;
 import com.lingmart.order.dto.OrderExportRow;
 import com.lingmart.order.dto.OrderItemDTO;
+import com.lingmart.order.dto.ShipDTO;
 import com.lingmart.order.entity.Order;
 import com.lingmart.order.entity.OrderItem;
 import com.lingmart.order.entity.OrderPaidEvent;
+import com.lingmart.order.entity.UserAddress;
 import com.lingmart.order.feign.ProductFeignClient;
 import com.lingmart.order.feign.ShopFeignClient;
 import com.lingmart.order.feign.WareFeignClient;
 import com.lingmart.order.mapper.OrderItemMapper;
 import com.lingmart.order.mapper.OrderMapper;
 import com.lingmart.order.mapper.OrderPaidEventMapper;
+import com.lingmart.order.service.AddressService;
 import com.lingmart.order.service.OrderService;
 import com.lingmart.order.util.OrderSnGenerator;
 import com.lingmart.order.vo.OrderDetailVO;
@@ -43,15 +48,16 @@ import org.apache.ibatis.cursor.Cursor;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.context.request.RequestAttributes;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.util.StringUtils;
 
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -83,6 +89,10 @@ public class OrderServiceImpl implements OrderService {
     private static final int REFUND_APPROVED = 2;     // 已退款
     private static final int REFUND_REJECTED = 3;     // 退款拒绝
 
+    /** 发货方式（v0.27）：必须显式选择，不复用 order_status */
+    private static final int DELIVERY_EXPRESS = 1;    // 快递发货
+    private static final int DELIVERY_NO_LOGISTICS = 2; // 无需物流（自提 / 面交）
+
     private final OrderMapper orderMapper;
     private final OrderItemMapper orderItemMapper;
     private final ProductFeignClient productFeignClient;
@@ -91,6 +101,7 @@ public class OrderServiceImpl implements OrderService {
     private final RabbitTemplate rabbitTemplate;
     private final OrderPaidEventMapper orderPaidEventMapper;
     private final ObjectMapper objectMapper;
+    private final AddressService addressService;
 
     @Override
     @SentinelResource(value = "createOrder", blockHandler = "createOrderBlock")
@@ -121,15 +132,20 @@ public class OrderServiceImpl implements OrderService {
         for (OrderItemDTO itemDto : dto.getItems()) {
             SkuInfoDTO sku = R.checkOk(productFeignClient.getSkuInfo(itemDto.getSkuId()));
             if (sku == null) {
+                // 结构化失败日志：压测/排障时按 buyerId、skuId、reason 聚合，不再只有一句异常文案
+                log.warn("下单失败：buyerId={}, skuId={}, reason=商品不存在", buyerId, itemDto.getSkuId());
                 throw new BizException("商品不存在：skuId=" + itemDto.getSkuId());
             }
             if (myShopId != null && Objects.equals(myShopId, sku.getShopId())) {
+                log.warn("下单失败：buyerId={}, skuId={}, reason=不能购买自己店铺的商品", buyerId, itemDto.getSkuId());
                 throw new BizException("不能购买自己店铺的商品");
             }
             // 单店铺订单约束
             if (shopId == null) {
                 shopId = sku.getShopId();
             } else if (!Objects.equals(shopId, sku.getShopId())) {
+                log.warn("下单失败：buyerId={}, skuId={}, shopId={}, firstShopId={}, reason=一次下单仅支持同一店铺的商品",
+                        buyerId, itemDto.getSkuId(), sku.getShopId(), shopId);
                 throw new BizException("一次下单仅支持同一店铺的商品");
             }
 
@@ -147,7 +163,11 @@ public class OrderServiceImpl implements OrderService {
             items.add(item);
         }
 
-        // 2. 建单（订单 + 明细）
+        // 2. 解析收货地址并快照（本地查询，无远程调用）。放在建单之前：
+        //    没有可用地址时直接失败，不会留下一条没有收货信息的订单再回滚
+        UserAddress address = addressService.resolveForCheckout(buyerId, dto.getAddressId());
+
+        // 3. 建单（订单 + 明细）
         String orderSn = OrderSnGenerator.generate();
         Order order = new Order();
         order.setOrderSn(orderSn);
@@ -157,6 +177,12 @@ public class OrderServiceImpl implements OrderService {
         order.setPayStatus(0);
         order.setOrderStatus(ORDER_PENDING_PAY);
         order.setBuyerRemark(dto.getBuyerRemark());
+        // 收货信息是快照：地址簿后续被修改或删除都不影响这张订单
+        order.setAddressId(address.getId());
+        order.setReceiverName(address.getReceiverName());
+        order.setReceiverPhone(address.getReceiverPhone());
+        order.setReceiverRegion(address.getProvince() + " " + address.getCity() + " " + address.getDistrict());
+        order.setReceiverDetail(address.getDetailAddress());
         order.setIdempotencyKey(StringUtils.hasText(idempotencyKey) ? idempotencyKey : null);
         try {
             orderMapper.insert(order);
@@ -179,11 +205,27 @@ public class OrderServiceImpl implements OrderService {
             orderItemMapper.insert(item);
         }
 
-        // 3. 锁库存（Seata 全局事务内，ware 分支随全局回滚）
+        // 4. 锁库存（Seata 全局事务内，ware 分支随全局回滚）
         StockLockRequest lockRequest = new StockLockRequest();
         lockRequest.setOrderSn(orderSn);
         lockRequest.setItems(items.stream().map(this::toLockItem).toList());
-        R.checkOk(wareFeignClient.lockStock(lockRequest));
+        try {
+            R.checkOk(wareFeignClient.lockStock(lockRequest));
+        } catch (RuntimeException e) {
+            // 压测里最大的一类失败就在这里（库存不足 / ware 超时 / 全局锁等待）。
+            // 先把订单号与 SKU 落下来，异常再照常抛给全局处理器——不吞、不改变事务语义。
+            log.warn("下单失败：buyerId={}, orderSn={}, skus={}, reason=锁库存失败: {}",
+                    buyerId, orderSn, items.stream().map(OrderItem::getSkuId).toList(), e.getMessage());
+            throw e;
+        }
+
+        // 故障注入（默认关闭）：模拟「ware 分支已成功、全局事务随后失败」，
+        // 用来验证 undo_log 是否把 ware 的锁定真正回滚掉。仅验证用，勿在生产开启。
+        if (faultInjectionRequested()) {
+            log.warn("故障注入触发：orderSn={}, buyerId={}, skus={} —— 锁库存后强制失败",
+                    orderSn, buyerId, items.stream().map(OrderItem::getSkuId).toList());
+            throw new IllegalStateException("FAULT_INJECTION: after-lock");
+        }
 
         log.info("创建订单成功：orderSn={}, buyerId={}, amount={}", orderSn, buyerId, total);
         return orderSn;
@@ -211,15 +253,10 @@ public class OrderServiceImpl implements OrderService {
         update.setPayStatus(1);
         update.setOrderStatus(ORDER_PAID);
         update.setPayTime(LocalDateTime.now());
-        // 状态流转走「带条件的原子更新」：与 reviewRefund 同一写法。旧实现是「先查后改」（updateById 无条件），
-        // 一旦同单并发/重复进入本方法（网关重试、MQ 驱动化改造、或 Seata 降级），后面的 updateSale 会把销量
-        // 重复累加（sale_count = sale_count + N，无幂等键）。这里把状态守卫作为唯一的并发闸门。
-        int rows = orderMapper.update(update, new LambdaQueryWrapper<Order>()
-                .eq(Order::getId, order.getId())
-                .eq(Order::getOrderStatus, ORDER_PENDING_PAY));
-        if (rows == 0) {
-            throw new BizException("订单状态不允许支付");
-        }
+        // 状态守卫是唯一的并发闸门（实现见 transitionOrSkip）：旧实现是「先查后改」（updateById 无条件），
+        // 一旦重复进入本方法（网关重试、MQ 驱动化改造、或 Seata 降级），后面的 updateSale 会把销量
+        // 重复累加（sale_count = sale_count + N，无幂等键）
+        transitionOrThrow(update, Order::getOrderStatus, List.of(ORDER_PENDING_PAY), "订单状态不允许支付");
         // 销量同步累加（SPU/SKU）仍在本全局事务内，与订单状态原子（product 暂不事件化）
         R.checkOk(productFeignClient.updateSale(buildSaleItems(order)));
         // 库存扣减改为“支付成功事件 + ware 异步消费”：支付成功事件写入 Outbox（与订单状态同一本地事务，
@@ -259,28 +296,51 @@ public class OrderServiceImpl implements OrderService {
     @Transactional(rollbackFor = Exception.class)
     public void cancel(Long buyerId, String orderSn) {
         Order order = requireOwnedOrder(orderSn, buyerId);
-        if (order.getOrderStatus() != ORDER_PENDING_PAY) {
+        // 不再「先读后判」（读了也可能立刻被支付改变）：doCancel 内以条件更新做原子守卫，
+        // 返回 false 说明该单已被支付或已取消，此时不得解锁库存
+        if (!doCancel(order)) {
             throw new BizException("订单状态不允许取消");
         }
-        doCancel(order);
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void confirm(Long buyerId, String orderSn) {
         Order order = requireOwnedOrder(orderSn, buyerId);
-        if (order.getOrderStatus() != ORDER_SHIPPED) {
-            throw new BizException("订单状态不允许确认收货");
+        Order update = new Order();
+        update.setId(order.getId());
+        update.setOrderStatus(ORDER_COMPLETED);
+        update.setCompleteTime(LocalDateTime.now());
+        transitionOrThrow(update, Order::getOrderStatus, List.of(ORDER_SHIPPED), "订单状态不允许确认收货");
+        log.info("订单确认收货：orderSn={}, buyerId={}", orderSn, buyerId);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void confirmBySystem(String orderSn) {
+        Order order = orderMapper.selectOne(new LambdaQueryWrapper<Order>().eq(Order::getOrderSn, orderSn));
+        if (order == null) {
+            return;
+        }
+        // 退款进行中不自动确认收货：买家已经在走售后，系统再把它推到「已完成」会让退款审核语义变乱
+        if (order.getRefundStatus() != null && order.getRefundStatus() != REFUND_NONE) {
+            log.debug("退款流程进行中，跳过自动确认收货：orderSn={}, refundStatus={}", orderSn, order.getRefundStatus());
+            return;
         }
         Order update = new Order();
         update.setId(order.getId());
         update.setOrderStatus(ORDER_COMPLETED);
         update.setCompleteTime(LocalDateTime.now());
-        orderMapper.updateById(update);
-        log.info("订单确认收货：orderSn={}, buyerId={}", orderSn, buyerId);
+        // 与买家手动确认共用同一个原子守卫：并发时只有一方能命中，另一方静默跳过
+        if (!transitionOrSkip(update, Order::getOrderStatus, List.of(ORDER_SHIPPED))) {
+            log.debug("系统自动确认收货跳过：状态已变更，orderSn={}", orderSn);
+            return;
+        }
+        log.info("发货超时，系统自动确认收货：orderSn={}, buyerId={}", orderSn, order.getBuyerId());
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void requestRefund(Long buyerId, String orderSn, String reason) {
         Order order = requireOwnedOrder(orderSn, buyerId);
         // 仅已支付/已发货/已完成可申请退款，且当前无退款记录（不含已拒绝——拒绝后可重新申请）
@@ -303,8 +363,15 @@ public class OrderServiceImpl implements OrderService {
         update.setId(order.getId());
         update.setRefundStatus(REFUND_PENDING);
         update.setRefundReason(reason);
-        update.setRefundRejectReason(null); // 重新申请时清空上次拒绝原因
-        orderMapper.updateById(update);
+        // 退款申请时间：卖家超时未处理的计时锚点（与 refundTime「处理时间」区分）
+        update.setRefundApplyTime(LocalDateTime.now());
+        // 原子守卫：仅「无退款(0)」或「已拒绝(3)」可申请。上面的预检只为给出更精确的提示语，
+        // 真正的并发闸门在这里——两次并发申请只有一次能命中，不会出现两条「退款中」记录。
+        // 第三个参数把「上次拒绝原因」置 null：entity 里置 null 无效（NOT_NULL 策略），必须经 wrapper
+        if (!transitionOrSkip(update, Order::getRefundStatus, List.of(REFUND_NONE, REFUND_REJECTED),
+                Order::getRefundRejectReason)) {
+            throw new BizException("已有退款申请审核中，请耐心等待");
+        }
         log.info("买家申请退款：orderSn={}, buyerId={}, reason={}", orderSn, buyerId, reason);
     }
 
@@ -323,42 +390,91 @@ public class OrderServiceImpl implements OrderService {
         if (order.getRefundStatus() == null || order.getRefundStatus() != REFUND_PENDING) {
             throw new BizException("该订单没有待审核的退款申请");
         }
-        Order update = new Order();
-        update.setId(order.getId());
-        update.setRefundTime(LocalDateTime.now());
         if (approve) {
-            // 通过：订单置已退款（不再计入销售统计）+ 库存回补 + 销量回退
-            update.setRefundStatus(REFUND_APPROVED);
-            update.setOrderStatus(ORDER_REFUNDED);
-            // 带条件的原子更新：仅「待审核」可流转 —— 并发/重复点击时只有一个能进入本分支，
-            // 从而保证库存回补与销量回退各自只执行一次（原「读-判断-写」并非原子）
-            int rows = orderMapper.update(update, new LambdaQueryWrapper<Order>()
-                    .eq(Order::getId, order.getId())
-                    .eq(Order::getRefundStatus, REFUND_PENDING));
-            if (rows == 0) {
+            // 通过：订单置已退款 + 库存回补 + 销量回退。与「超时自动同意」共用同一实现，见 approveRefund
+            if (!approveRefund(order)) {
                 throw new BizException("该订单没有待审核的退款申请");
             }
-            // 顺序不可调整：ware 是 Seata AT 分支（可随全局事务一起回滚）；
-            // product 未引入 seata 客户端，其写入不受全局事务保护，必须放在最后，
-            // 使「product 已回退而后续失败」的不一致窗口降为 0
-            R.checkOk(wareFeignClient.restockStock(buildLockRequest(order)));
-            R.checkOk(productFeignClient.rollbackSale(orderSn, buildSaleItems(order)));
-            log.info("退款审核通过（已回补库存并回退销量）：orderSn={}, shopId={}", orderSn, shop.getId());
         } else {
             // 拒绝：仅记拒绝状态与原因，订单维持原状（买家可重新申请）
             if (!StringUtils.hasText(rejectReason)) {
                 throw new BizException("请填写拒绝原因");
             }
+            Order update = new Order();
+            update.setId(order.getId());
+            update.setRefundTime(LocalDateTime.now());
             update.setRefundStatus(REFUND_REJECTED);
             update.setRefundRejectReason(rejectReason);
-            orderMapper.updateById(update);
+            // 同样加原子守卫：与「通过」分支并发时只有一个能成功，
+            // 否则会出现「库存已回补、订单已退款，但 refund_status 被覆盖成已拒绝」的矛盾状态
+            transitionOrThrow(update, Order::getRefundStatus, List.of(REFUND_PENDING),
+                    "该订单没有待审核的退款申请");
             log.info("退款审核拒绝：orderSn={}, reason={}", orderSn, rejectReason);
         }
     }
 
+    /**
+     * 退款通过（卖家手动审核 / 系统超时自动 共用）。
+     *
+     * <p>抽成一个方法的原因：两条路径的**守卫与副作用必须完全一致**——订单置已退款、
+     * 库存回补、销量回退，以及「并发时只有一方能命中」的原子守卫。各写一份迟早会漂移，
+     * 而漂移的后果是库存与销量被重复回补/回退。</p>
+     *
+     * @param order 待处理的订单（方法内以原子守卫再确认一次状态，不依赖调用方的预检）
+     * @return true=本次通过生效；false=状态已被并发改动（卖家刚处理过/重复触发），未做任何写入
+     */
+    private boolean approveRefund(Order order) {
+        Order update = new Order();
+        update.setId(order.getId());
+        update.setRefundTime(LocalDateTime.now());
+        update.setRefundStatus(REFUND_APPROVED);
+        update.setOrderStatus(ORDER_REFUNDED);
+        // 原子守卫：仅「退款中」可流转 —— 并发/重复触发时只有一个能进入本分支，
+        // 保证库存回补与销量回退各自只执行一次（原「读-判断-写」并非原子）。
+        // 返回 boolean 而非直接抛异常：手动路径要把「未命中」当错误告诉卖家，
+        // 自动路径则视为正常竞态（卖家恰好在扫描前处理了）静默跳过
+        if (!transitionOrSkip(update, Order::getRefundStatus, List.of(REFUND_PENDING))) {
+            return false;
+        }
+        // ware 与 product 均为 Seata AT 分支（product 已接入 seata starter），
+        // 两者的写入都随本全局事务一起提交或回滚，故调用顺序不再影响一致性
+        R.checkOk(wareFeignClient.restockStock(buildLockRequest(order)));
+        R.checkOk(productFeignClient.rollbackSale(order.getOrderSn(), buildSaleItems(order)));
+        log.info("退款已通过（已回补库存并回退销量）：orderSn={}, shopId={}", order.getOrderSn(), order.getShopId());
+        return true;
+    }
+
+    /**
+     * 单笔退款的超时自动同意（v0.27）。
+     *
+     * <p>与 {@code cancelByTimeout} 同构：没有卖家上下文，故不做店铺归属校验；
+     * 状态守卫由 {@link #approveRefund} 内部完成，与卖家手动审核并发时只有一方能命中。</p>
+     *
+     * <p>由 {@code RefundAutoApproveJob} 调用（**必须经 Spring 代理调用**，
+     * 否则本方法上的事务注解会因自调用而失效——订单服务里的 {@code scanTimeoutOrders}
+     * 就踩过这个坑）。</p>
+     */
+    @Override
+    @GlobalTransactional(name = "autoApproveRefund", rollbackFor = Exception.class)
+    @Transactional(rollbackFor = Exception.class)
+    public void autoApproveTimeoutRefund(String orderSn) {
+        Order order = orderMapper.selectOne(new LambdaQueryWrapper<Order>().eq(Order::getOrderSn, orderSn));
+        if (order == null || order.getRefundStatus() == null || order.getRefundStatus() != REFUND_PENDING) {
+            log.debug("退款超时自动同意跳过：订单不存在或退款状态已变更，orderSn={}", orderSn);
+            return;
+        }
+        if (!approveRefund(order)) {
+            // 从上面的预检到守卫之间存在窗口（卖家恰好在这期间处理了）——属正常竞态，不报错
+            log.debug("退款超时自动同意跳过：守卫未命中（已被卖家处理），orderSn={}", orderSn);
+            return;
+        }
+        log.info("退款申请超时未处理，已自动同意：orderSn={}, 申请时间={}", orderSn, order.getRefundApplyTime());
+    }
+
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void ship(Long userId, String orderSn) {
+    public void ship(Long userId, String orderSn, ShipDTO dto) {
+        validateShipDTO(dto);
         ShopInfo shop = requireSellerShop(userId);
         Order order = orderMapper.selectOne(new LambdaQueryWrapper<Order>().eq(Order::getOrderSn, orderSn));
         if (order == null) {
@@ -367,15 +483,49 @@ public class OrderServiceImpl implements OrderService {
         if (!Objects.equals(order.getShopId(), shop.getId())) {
             throw new BizException(ResultCode.FORBIDDEN.getCode(), "无权操作该订单");
         }
-        if (order.getOrderStatus() != ORDER_PAID) {
-            throw new BizException("订单状态不允许发货");
-        }
+        boolean express = dto.getDeliveryMode() == DELIVERY_EXPRESS;
         Order update = new Order();
         update.setId(order.getId());
         update.setOrderStatus(ORDER_SHIPPED);
         update.setShipTime(LocalDateTime.now());
-        orderMapper.updateById(update);
-        log.info("订单发货：orderSn={}, shopId={}", orderSn, shop.getId());
+        update.setDeliveryMode(dto.getDeliveryMode());
+        // 非快递方式不落公司与单号（validateShipDTO 已保证此时它们为空，这里再显式置 null 以免脏数据）
+        update.setShippingCompany(express ? dto.getShippingCompany().trim() : null);
+        update.setTrackingNo(express ? dto.getTrackingNo().trim() : null);
+        transitionOrThrow(update, Order::getOrderStatus, List.of(ORDER_PAID), "订单状态不允许发货");
+        log.info("订单发货：orderSn={}, shopId={}, 方式={}", orderSn, shop.getId(),
+                express ? "快递 " + update.getShippingCompany() + " " + update.getTrackingNo() : "无需物流");
+    }
+
+    /**
+     * 校验发货参数（v0.27）。
+     *
+     * <p>「选了快递才要单号」是**字段之间的条件依赖**，注解表达不了
+     * （{@code @NotBlank} 无法写成「仅当 deliveryMode=1 时必填」），故在此显式校验。</p>
+     *
+     * <p>「无需物流却传了单号」选择**报错而非静默丢弃**：本项目一贯避免静默吞错，
+     * 静默丢弃会掩盖前端的 bug，也会让库里出现语义矛盾的数据。</p>
+     */
+    private void validateShipDTO(ShipDTO dto) {
+        if (dto == null || dto.getDeliveryMode() == null) {
+            throw new BizException("请选择发货方式");
+        }
+        boolean hasCompany = StringUtils.hasText(dto.getShippingCompany());
+        boolean hasTracking = StringUtils.hasText(dto.getTrackingNo());
+        if (dto.getDeliveryMode() == DELIVERY_EXPRESS) {
+            if (!hasCompany) {
+                throw new BizException("快递发货请填写快递公司");
+            }
+            if (!hasTracking) {
+                throw new BizException("快递发货请填写运单号");
+            }
+        } else if (dto.getDeliveryMode() == DELIVERY_NO_LOGISTICS) {
+            if (hasCompany || hasTracking) {
+                throw new BizException("无需物流的发货方式不应填写快递公司与运单号");
+            }
+        } else {
+            throw new BizException("发货方式不合法");
+        }
     }
 
     @Override
@@ -383,9 +533,16 @@ public class OrderServiceImpl implements OrderService {
     @Transactional(rollbackFor = Exception.class)
     public void cancelByTimeout(String orderSn) {
         Order order = orderMapper.selectOne(new LambdaQueryWrapper<Order>().eq(Order::getOrderSn, orderSn));
-        if (order != null && order.getOrderStatus() == ORDER_PENDING_PAY) {
-            doCancel(order);
+        if (order == null) {
+            return;
+        }
+        // 兜底路径：本方法由 MQ 延迟消息与定时扫描双路触发，同一单可能被并发处理，
+        // 且订单可能已被用户支付/取消 —— 状态守卫未命中属正常情况，静默跳过而非抛异常
+        // （抛异常会中断整轮超时扫描）
+        if (doCancel(order)) {
             log.info("订单超时自动取消：orderSn={}", orderSn);
+        } else {
+            log.debug("超时取消跳过：订单状态已变更，orderSn={}", orderSn);
         }
     }
 
@@ -429,34 +586,35 @@ public class OrderServiceImpl implements OrderService {
         return toDetailVO(order, isBuyer);
     }
 
-    /** 支付超时时间（毫秒），来自 application.yml */
-    @Value("${lingmart.order.timeout-ms:120000}")
-    private long timeoutMs;
-
     /**
-     * 超时订单兜底扫描：MQ 延迟消息丢失/发送失败时，仍能取消超时未支付订单。
-     * 与 RabbitMQ TTL 取消互补，保证最终一致性。
+     * 故障注入开关（默认关）。
+     *
+     * <p>仅在验证 Seata 全局回滚时临时打开（{@code LINGMART_ORDER_FAULT_INJECTION_ENABLED=true}），
+     * 配合请求头 {@code X-Fault-Inject: after-lock} 在锁库存之后强制抛异常，
+     * 用来观察 {@code locked_stock}/{@code ware_order_task} 是否被 undo_log 回滚干净。
+     * 具体步骤见 {@code scripts/verify-seata-rollback.sh}。</p>
      */
-    @Scheduled(fixedDelayString = "${lingmart.order.scan-interval-ms:60000}")
-    public void scanTimeoutOrders() {
-        List<Order> overdue = orderMapper.selectList(new LambdaQueryWrapper<Order>()
-                .eq(Order::getOrderStatus, ORDER_PENDING_PAY)
-                .lt(Order::getCreateTime, LocalDateTime.now().minus(Duration.ofMillis(timeoutMs))));
-        int cancelled = 0;
-        for (Order order : overdue) {
-            try {
-                cancelByTimeout(order.getOrderSn());
-                cancelled++;
-            } catch (Exception e) {
-                log.error("超时兜底取消失败：orderSn={}, err={}", order.getOrderSn(), e.getMessage());
-            }
-        }
-        if (cancelled > 0) {
-            log.info("超时兜底扫描：本次取消 {} 个订单", cancelled);
-        }
-    }
+    @Value("${lingmart.order.fault-injection.enabled:false}")
+    private boolean faultInjectionEnabled;
 
     // ==================== 私有辅助方法 ====================
+
+    /**
+     * 本次请求是否要求故障注入。
+     *
+     * <p>双重条件：配置开关打开（默认关）+ 请求头精确匹配。开关关闭时连请求头都不读，
+     * 生产环境下即使有人带了这个头也不会有任何影响。</p>
+     */
+    private boolean faultInjectionRequested() {
+        if (!faultInjectionEnabled) {
+            return false;
+        }
+        RequestAttributes attrs = RequestContextHolder.getRequestAttributes();
+        if (!(attrs instanceof ServletRequestAttributes servlet)) {
+            return false;
+        }
+        return "after-lock".equalsIgnoreCase(servlet.getRequest().getHeader("X-Fault-Inject"));
+    }
 
     private Order requireOwnedOrder(String orderSn, Long buyerId) {
         Order order = orderMapper.selectOne(new LambdaQueryWrapper<Order>().eq(Order::getOrderSn, orderSn));
@@ -477,15 +635,68 @@ public class OrderServiceImpl implements OrderService {
         return shop;
     }
 
-    /** 取消订单：置已取消 + 解锁库存 */
-    private void doCancel(Order order) {
+    /**
+     * 状态守卫流转（静默版）：仅当 {@code guard} 字段的当前值 ∈ {@code expectValues} 时才写入。
+     *
+     * <p>把「状态判断」从 Java 的 if 挪进 SQL 的 WHERE，使其与写入成为一个原子操作——
+     * 这是订单状态机唯一的并发闸门。原「先查后改」（{@code updateById} 无条件）在并发下
+     * 两个请求都能通过前置检查，从而各自执行后续副作用（取消订单时扣了库存、支付时重复累加销量）。
+     * 由于副作用无法随「后写覆盖先写」一起撤销，必须在写入这一步就分出胜负。</p>
+     *
+     * @return true=已流转；false=状态已被并发改动（调用方自行决定抛异常还是静默跳过）
+     */
+    private boolean transitionOrSkip(Order update, SFunction<Order, Integer> guard, List<Integer> expectValues) {
+        return transitionOrSkip(update, guard, expectValues, null);
+    }
+
+    /**
+     * 同 {@link #transitionOrSkip(Order, SFunction, List)}，并把 {@code clearField} 这一列**置为 null**。
+     *
+     * <p>为什么需要这个参数：MyBatis-Plus 的 entity 更新默认走 NOT_NULL 策略，
+     * entity 中为 null 的字段**不会进入 SET 子句**——想清空一列只能靠 UpdateWrapper 的
+     * {@code set(field, null)}。原先 {@code requestRefund} 里写的是
+     * {@code update.setRefundRejectReason(null)} 并注释「重新申请时清空上次拒绝原因」，
+     * 那行注释承诺了行为、代码却没做到（买家重新申请后被拒，库里仍留着上一次的原因）。</p>
+     */
+    private boolean transitionOrSkip(Order update, SFunction<Order, Integer> guard, List<Integer> expectValues,
+                                     SFunction<Order, ?> clearField) {
+        LambdaUpdateWrapper<Order> wrapper = new LambdaUpdateWrapper<Order>()
+                .eq(Order::getId, update.getId())
+                .in(guard, expectValues);
+        if (clearField != null) {
+            wrapper.set(clearField, null);
+        }
+        return orderMapper.update(update, wrapper) > 0;
+    }
+
+    /**
+     * 状态守卫流转（严格版）：未命中即抛 {@link BizException}。
+     *
+     * @param rejectMsg 未命中时的提示语（面向用户，与各调用点原有话术保持一致）
+     */
+    private void transitionOrThrow(Order update, SFunction<Order, Integer> guard,
+                                   List<Integer> expectValues, String rejectMsg) {
+        if (!transitionOrSkip(update, guard, expectValues)) {
+            throw new BizException(rejectMsg);
+        }
+    }
+
+    /**
+     * 取消订单：置已取消 + 解锁库存。
+     *
+     * @return true=本次取消生效；false=状态已变（已被支付/已取消），未写库也未解锁库存
+     */
+    private boolean doCancel(Order order) {
         Order update = new Order();
         update.setId(order.getId());
         update.setOrderStatus(ORDER_CANCELLED);
         update.setCancelTime(LocalDateTime.now());
-        orderMapper.updateById(update);
+        if (!transitionOrSkip(update, Order::getOrderStatus, List.of(ORDER_PENDING_PAY))) {
+            return false;
+        }
         R.checkOk(wareFeignClient.unlockStock(buildLockRequest(order)));
         log.info("订单已取消：orderSn={}", order.getOrderSn());
+        return true;
     }
 
     /** 由订单明细组装库存操作请求 */
@@ -556,6 +767,11 @@ public class OrderServiceImpl implements OrderService {
                         Collectors.mapping(this::toItemVO, Collectors.toList())));
     }
 
+    /** null 转空串（拼接收货地址时避免出现 "null" 字样）。 */
+    private static String nullToEmpty(String value) {
+        return value == null ? "" : value;
+    }
+
     private OrderDetailVO toDetailVO(Order order, List<OrderItemVO> items) {
         OrderDetailVO vo = new OrderDetailVO();
         vo.setId(order.getId());
@@ -569,9 +785,22 @@ public class OrderServiceImpl implements OrderService {
         vo.setRefundReason(order.getRefundReason());
         vo.setRefundRejectReason(order.getRefundRejectReason());
         vo.setRefundTime(order.getRefundTime());
+        vo.setRefundApplyTime(order.getRefundApplyTime());
         vo.setBuyerRemark(order.getBuyerRemark());
         vo.setPayTime(order.getPayTime());
         vo.setShipTime(order.getShipTime());
+        vo.setDeliveryMode(order.getDeliveryMode());
+        vo.setShippingCompany(order.getShippingCompany());
+        vo.setTrackingNo(order.getTrackingNo());
+        vo.setReceiverName(order.getReceiverName());
+        vo.setReceiverPhone(order.getReceiverPhone());
+        vo.setReceiverRegion(order.getReceiverRegion());
+        vo.setReceiverDetail(order.getReceiverDetail());
+        // 存量订单（v0.39 之前）没有收货信息：保持 null，前端据此不渲染该区块
+        if (order.getReceiverName() != null) {
+            vo.setReceiverFullAddress(String.join(" ",
+                    nullToEmpty(order.getReceiverRegion()), nullToEmpty(order.getReceiverDetail())).trim());
+        }
         vo.setCompleteTime(order.getCompleteTime());
         vo.setCancelTime(order.getCancelTime());
         vo.setCreateTime(order.getCreateTime());

@@ -53,6 +53,16 @@ spring:
     username: ${RABBITMQ_USERNAME:guest}
     password: ${RABBITMQ_PASSWORD:guest}
     virtual-host: /
+    # 生产端可靠性：Outbox 转发必须知道 broker 是否真的收下了消息。
+    #   correlated = 每条消息带 CorrelationData，可异步等待 ack/nack；
+    #   returns    = 消息无法路由（交换机不存在/绑定缺失）时回传，而不是静默丢弃。
+    # 两者配合后，OrderPaidOutboxRelay 只在「已 ack 且未被退回」时才把事件置为已发送。
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      # mandatory=true：没有匹配队列的消息才可能触发 return（Boot 会按 publisher-returns 推导，
+      # 这里显式写出，避免换版本后行为漂移）
+      mandatory: true
     # 消费失败重试由 RabbitMqConfig 的容器工厂统一配置（退避重试 → RepublishMessageRecoverer 重发死信），
     # 不依赖队列级死信参数，旧队列无需删除即可热升级
 
@@ -104,5 +114,15 @@ service.default.grouplist: ${SEATA_GROUPLIST:127.0.0.1:8091}
 lingmart:
   order:
     timeout-ms: 120000
+    # 退款申请后卖家多久未处理则自动同意（毫秒，默认 24 小时）。
+    # 联调时可临时调小（如 60000 = 1 分钟），否则要等一整天才能验证这条链路。
+    refund-auto-approve-ms: 86400000
+    # 退款超时扫描间隔（毫秒，默认 1 分钟）：实际生效时间 = 阈值 ~ 阈值 + 本间隔
+    refund-scan-interval-ms: 60000
+    # 发货后多少天自动确认收货（默认 7 天）。设为 0 或负数会导致所有已发货订单在下一轮立即完成，
+    # 联调时可临时调小（如 1 = 第二天就能看到效果）。
+    auto-confirm-days: ${AUTO_CONFIRM_DAYS:7}
+    # 自动确认收货的扫描间隔（毫秒，默认 1 小时）：实际生效时间 = 阈值 ~ 阈值 + 本间隔
+    auto-confirm-scan-ms: ${AUTO_CONFIRM_SCAN_MS:3600000}
 
 # 管理端点与链路追踪已移至 Nacos 共享配置（lingmart-common.yaml）

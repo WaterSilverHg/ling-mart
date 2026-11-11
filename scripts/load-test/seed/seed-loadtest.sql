@@ -121,6 +121,8 @@ BEGIN
     DELETE FROM `lingmart_product`.`spu`        WHERE `id` BETWEEN 9400001 AND 9400500;
     DELETE FROM `lingmart_ware`.`ware_sku`      WHERE `id` BETWEEN 9700001 AND 9701500;
     DELETE FROM `lingmart_shop`.`shop`          WHERE `id` BETWEEN 9300001 AND 9300020;
+    -- 收货地址（v0.39 起下单需要地址；压测买家各一条默认地址）
+    DELETE FROM `lingmart_order`.`user_address` WHERE `id` BETWEEN 9900001 AND 9900020;
     DELETE FROM `lingmart_auth`.`user`          WHERE `id` BETWEEN 9100001 AND 9100020;
     DELETE FROM `lingmart_auth`.`user`          WHERE `id` BETWEEN 9200001 AND 9200020;
 
@@ -144,6 +146,17 @@ BEGIN
     INSERT INTO `lingmart_auth`.`user` (`id`, `phone`, `password`, `nickname`, `avatar`, `role`, `status`)
     SELECT 9200000 + s.`n`, CONCAT('138', LPAD(s.`n`, 8, '0')), v_pwd,
            CONCAT('压测卖家', LPAD(s.`n`, 2, '0')), NULL, 'ROLE_SELLER', 1
+      FROM `_seed_seq` s WHERE s.`n` <= 20;
+
+    -- ---------- 2.1 收货地址（每位买家一条默认地址） ----------
+    -- v0.39 起下单必须有收货地址：不给压测买家播种地址，order 场景会全部失败在「请先添加收货地址」。
+    -- 地址快照落在 order 表，与这张表没有外键关系，压测后 teardown 直接删不影响历史订单。
+    INSERT INTO `lingmart_order`.`user_address`
+        (`id`, `user_id`, `receiver_name`, `receiver_phone`, `province`, `city`, `district`,
+         `detail_address`, `is_default`)
+    SELECT 9900000 + s.`n`, 9100000 + s.`n`, CONCAT('压测买家', LPAD(s.`n`, 2, '0')),
+           CONCAT('139', LPAD(s.`n`, 8, '0')), '浙江省', '杭州市', '西湖区',
+           CONCAT('压测路 ', s.`n`, ' 号'), 1
       FROM `_seed_seq` s WHERE s.`n` <= 20;
 
     -- ---------- 3. 店铺（店主 = 上面的卖家，直接置营业中 + 审核通过） ----------
@@ -251,7 +264,8 @@ UNION ALL SELECT 'shops',      COUNT(*) FROM `lingmart_shop`.`shop`          WHE
 UNION ALL SELECT 'spu',        COUNT(*) FROM `lingmart_product`.`spu`        WHERE `id` BETWEEN 9400001 AND 9400500
 UNION ALL SELECT 'sku',        COUNT(*) FROM `lingmart_product`.`sku`        WHERE `id` BETWEEN 9500001 AND 9501500
 UNION ALL SELECT 'sku_images', COUNT(*) FROM `lingmart_product`.`sku_images` WHERE `id` BETWEEN 9600001 AND 9603000
-UNION ALL SELECT 'ware_sku',   COUNT(*) FROM `lingmart_ware`.`ware_sku`      WHERE `id` BETWEEN 9700001 AND 9701500;
+UNION ALL SELECT 'ware_sku',   COUNT(*) FROM `lingmart_ware`.`ware_sku`      WHERE `id` BETWEEN 9700001 AND 9701500
+UNION ALL SELECT 'address',    COUNT(*) FROM `lingmart_order`.`user_address` WHERE `id` BETWEEN 9900001 AND 9900020;
 
 -- 抽样看一眼生成的中文标题（读中文需要控制台是 UTF-8：先 chcp 65001）
 -- 注意 spu 表没有 price 列，最低价叫 min_price（price 在 sku 表上）

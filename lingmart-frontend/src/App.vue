@@ -10,13 +10,14 @@
         <router-link to="/" class="brand">轻营商城</router-link>
         <nav class="nav">
           <router-link to="/">首页</router-link>
-          <!-- 管理员仅管理后台，不展示任何商城功能入口；申请开店/我的订单等入口在用户下拉菜单 -->
+          <!-- 管理员仅管理后台，不展示任何商城功能入口；申请开店/我的订单等入口在用户下拉菜单。
+               注意：管理端路由带 layout:'blank'，本顶栏在管理端根本不渲染，
+               故这里不再需要 isAdmin 的分支（原先的「管理后台」链接已不可达，已删除）。 -->
           <template v-if="authStore.isLogin && !authStore.isAdmin">
             <router-link to="/cart">购物车</router-link>
             <router-link to="/chat">消息</router-link>
             <router-link v-if="authStore.isSeller" to="/seller">卖家中心</router-link>
           </template>
-          <router-link v-if="authStore.isAdmin" to="/admin/review">管理后台</router-link>
         </nav>
         <div class="user">
           <template v-if="authStore.isLogin">
@@ -29,11 +30,11 @@
                 <el-dropdown-menu>
                   <el-dropdown-item v-if="!authStore.isAdmin" command="profile">个人资料</el-dropdown-item>
                   <el-dropdown-item v-if="!authStore.isAdmin" command="orders">我的订单</el-dropdown-item>
+                  <el-dropdown-item v-if="!authStore.isAdmin" command="addresses">收货地址</el-dropdown-item>
                   <!-- 我的店铺：所有非管理员可查看（含审核中/被拒/已开店） -->
                   <el-dropdown-item v-if="!authStore.isAdmin" command="myShop">我的店铺</el-dropdown-item>
                   <el-dropdown-item v-if="!authStore.isSeller && !authStore.isAdmin" command="apply">申请开店</el-dropdown-item>
                   <el-dropdown-item v-if="authStore.isSeller" command="seller">卖家中心</el-dropdown-item>
-                  <el-dropdown-item v-if="authStore.isAdmin" command="admin">管理后台</el-dropdown-item>
                   <el-dropdown-item command="help" divided>帮助</el-dropdown-item>
                   <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
                 </el-dropdown-menu>
@@ -119,14 +120,14 @@ function onCommand(cmd) {
     router.push('/login')
   } else if (cmd === 'orders') {
     router.push('/orders')
+  } else if (cmd === 'addresses') {
+    router.push('/addresses')
   } else if (cmd === 'apply') {
     router.push('/shop/apply')
   } else if (cmd === 'myShop') {
     router.push('/my-shop')
   } else if (cmd === 'seller') {
     router.push('/seller')
-  } else if (cmd === 'admin') {
-    router.push('/admin')
   } else if (cmd === 'profile') {
     openProfile()
   } else if (cmd === 'help') {

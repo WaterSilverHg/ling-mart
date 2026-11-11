@@ -35,10 +35,10 @@ public class AgentAuditLog {
     /** 模型侧工具调用 ID */
     private String toolCallId;
 
-    /** 工具名（navigate_to / click_element） */
+    /** 工具名（navigate_to / click_element / prefill_shop_application；只读工具见 tool_run 事件） */
     private String toolName;
 
-    /** 前端动作（navigate / click） */
+    /** 前端动作（navigate / click / prefill） */
     private String action;
 
     /** 工具参数 JSON（route / elementId / elementText 等） */
@@ -50,7 +50,7 @@ public class AgentAuditLog {
     /** 用户动作：confirm / cancel */
     private String userAction;
 
-    /** 结果：success / failure / text / tools / empty / timeout 等 */
+    /** 结果：proposed / success / failure / rejected / text / tool / empty / ok / cache_hit / quota_exceeded / failed / blocked / reset */
     private String result;
 
     /** 失败原因或错误详情 */

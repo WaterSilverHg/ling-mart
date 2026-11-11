@@ -1,6 +1,7 @@
 package com.lingmart.agent.service;
 
 import com.lingmart.agent.config.AgentProperties;
+import com.lingmart.agent.dto.RetrievalResult;
 import com.lingmart.common.exception.BizException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
@@ -22,6 +23,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -128,20 +130,90 @@ public class KnowledgeBaseService {
         }
     }
 
-    /** 检索与 query 最相关的知识段落，失败时降级返回空。 */
+    /**
+     * 检索与 query 最相关的知识段落，失败时降级返回空。
+     *
+     * <p>保留这个方法是为了不改动对话主链路的调用形态；需要"命中了哪几篇"时用
+     * {@link #retrieve(String)}。</p>
+     */
     public List<String> search(String query) {
+        RetrievalResult result = retrieve(query);
+        return result.isEmpty() ? List.of() : List.of(result.text());
+    }
+
+    /** 按配置的 Top-K 检索，返回正文与命中来源。 */
+    public RetrievalResult retrieve(String query) {
+        return retrieve(query, properties.getKb().getTopK());
+    }
+
+    /**
+     * 按指定 Top-K 检索，返回正文与命中来源。
+     *
+     * <p><b>埋点约定</b>：成功路径也打一行 INFO，记 query 长度、命中块数与来源文件名、最高相似度；
+     * <b>不记用户原文</b>——沿用"不把对话正文写进日志"的既有约定。没有这行日志，
+     * "这轮为什么答错了/为什么像在编"就只能靠猜，召回率也无从统计。</p>
+     *
+     * @param topK 返回的段落数（&lt;1 时按 1 处理）
+     */
+    public RetrievalResult retrieve(String query, int topK) {
         if (!available()) {
-            return List.of();
+            return RetrievalResult.EMPTY;
         }
+        int k = Math.max(1, topK);
         try {
             List<Document> docs = vectorStore.similaritySearch(
-                    SearchRequest.builder().query(query).topK(properties.getKb().getTopK()).build());
+                    SearchRequest.builder().query(query).topK(k).build());
+            if (docs == null || docs.isEmpty()) {
+                log.info("知识检索：queryLen={} topK={} 命中 0 块", length(query), k);
+                return RetrievalResult.EMPTY;
+            }
+            LinkedHashSet<String> sources = new LinkedHashSet<>();
+            Double topScore = null;
+            for (Document d : docs) {
+                String name = sourceName(d.getMetadata().get("source"));
+                if (!name.isEmpty()) {
+                    sources.add(name);
+                }
+                // 分数可能为 null（部分向量库/检索实现不返回），不能当 0 参与比较
+                Double score = d.getScore();
+                if (score != null && (topScore == null || score > topScore)) {
+                    topScore = score;
+                }
+            }
             String merged = mergeOverlapped(docs);
-            return StringUtils.hasText(merged) ? List.of(merged) : List.of();
+            log.info("知识检索：queryLen={} topK={} chunks={} sources={} topScore={}",
+                    length(query), k, docs.size(), sources, topScore);
+            return new RetrievalResult(merged == null ? "" : merged, List.copyOf(sources), topScore, docs.size());
         } catch (Exception e) {
             log.warn("Agent 知识检索失败，已降级为无知识问答：{}", e.getMessage());
-            return List.of();
+            return RetrievalResult.EMPTY;
         }
+    }
+
+    private static int length(String s) {
+        return s == null ? 0 : s.length();
+    }
+
+    /**
+     * 从向量库返回的 {@code source} 元数据里取出文件名。
+     *
+     * <p>入库时 {@code source} 用的是 {@code Resource#getDescription()}，实际形如
+     * {@code class path resource [kb/02-shop-guide.md]} 或 {@code file [/path/to/x.md]}，
+     * 带路径与方括号，不能直接与评估集里的文件名比对。这里统一裁成 basename；
+     * <b>不改写入侧的元数据</b>，这样已有向量库无需重建即可参与评估。</p>
+     */
+    static String sourceName(Object source) {
+        if (source == null) {
+            return "";
+        }
+        String s = String.valueOf(source).trim();
+        int slash = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+        String tail = slash >= 0 ? s.substring(slash + 1) : s;
+        // 去掉描述串尾部的方括号/空白（如 "...md]"）
+        while (!tail.isEmpty() && (tail.endsWith("]") || Character.isWhitespace(tail.charAt(tail.length() - 1)))) {
+            tail = tail.substring(0, tail.length() - 1).trim();
+        }
+        return tail;
     }
 
     /**
@@ -215,7 +287,6 @@ public class KnowledgeBaseService {
         List<Document> chunks = new ArrayList<>();
         for (Resource resource : listKnowledgeResources()) {
             try {
-                String fileName = resource.getFilename();
                 String text = resource.getContentAsString(StandardCharsets.UTF_8);
                 if (!StringUtils.hasText(text)) {
                     continue;

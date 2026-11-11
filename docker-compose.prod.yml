@@ -1,0 +1,80 @@
+# =============================================================
+# 轻营 · 生产加固覆盖层
+#
+# 用法（叠加在基础设施与业务编排之上）：
+#   docker compose -f docker-compose.yml -f docker-compose.business.yml \
+#                  -f docker-compose.prod.yml up -d
+#
+# 它做两件事：
+#   1. **不再把 8 个业务服务的端口发布到宿主机**。外部只能经网关 :88 访问，
+#      于是 /internal/**（服务间接口）与各服务 /actuator/** 不再能被公网直接打。
+#      这是 ops-checklist「/internal 网络隔离」那条的落地方式——网关本身不路由
+#      /internal/**，只要业务端口不对外，内部接口就在网络层被隔离了。
+#   2. 可选 TLS：`--profile tls` 启动 nginx，443 终止 TLS 后转发给网关 88。
+#      证书放 docker/nginx/certs/；本地可用 scripts/gen-self-signed-cert.sh 生成自签证书。
+#
+# ⚠️ 第 1 条依赖 Docker Compose v2.24+ 的 `!reset` 标签（用于清空继承来的 ports）。
+#    版本过低会解析失败；`docker compose version` 确认。
+# =============================================================
+services:
+
+  # 3. 打开「默认凭据守卫」（lingmart-common 的 DefaultCredentialGuardAutoConfiguration）：
+  #    启动时检查 JWT 密钥 / 数据库 / Nacos / RabbitMQ / 管理员口令 / 验证码明文开关，
+  #    只要还有一项是仓库内置默认值，服务直接启动失败并列出全部违规项。
+  #    开发环境保持关闭（compose 开发流本来就依赖这些默认值），因此只在本覆盖层打开。
+
+  lingmart-auth:
+    ports: !reset []
+    environment:
+      LINGMART_SECURITY_STRICT_CREDENTIALS: "true"
+  lingmart-shop:
+    ports: !reset []
+    environment:
+      LINGMART_SECURITY_STRICT_CREDENTIALS: "true"
+  lingmart-product:
+    ports: !reset []
+    environment:
+      LINGMART_SECURITY_STRICT_CREDENTIALS: "true"
+  lingmart-ware:
+    ports: !reset []
+    environment:
+      LINGMART_SECURITY_STRICT_CREDENTIALS: "true"
+  lingmart-order:
+    ports: !reset []
+    environment:
+      LINGMART_SECURITY_STRICT_CREDENTIALS: "true"
+  lingmart-search:
+    ports: !reset []
+    environment:
+      LINGMART_SECURITY_STRICT_CREDENTIALS: "true"
+  lingmart-chat:
+    ports: !reset []
+    environment:
+      LINGMART_SECURITY_STRICT_CREDENTIALS: "true"
+  lingmart-agent:
+    ports: !reset []
+    environment:
+      LINGMART_SECURITY_STRICT_CREDENTIALS: "true"
+
+  # 网关仍然对外（只暴露这一个入口）。若前有 nginx 终止 TLS，可进一步改成
+  #   ports: ["127.0.0.1:88:88"]
+  # 让它只绑本机，外部仅能经 443 进来。
+  lingmart-gateway:
+    ports:
+      - "88:88"
+    environment:
+      LINGMART_SECURITY_STRICT_CREDENTIALS: "true"
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: lingmart-nginx
+    profiles: ["tls"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/lingmart.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - lingmart-gateway
+    restart: unless-stopped

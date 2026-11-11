@@ -1,6 +1,16 @@
 <template>
   <div class="card" style="max-width: 720px">
     <h3 class="page-title">申请开店</h3>
+    <!-- 助手预填提示（v0.28）：交代草稿来源、有几条要补全、以及"提交要你自己点" -->
+    <el-alert
+      v-if="prefillNotice"
+      class="prefill-alert"
+      type="success"
+      show-icon
+      title="已按你提供的清单预填草稿"
+      :description="prefillNotice"
+      @close="prefillNotice = ''"
+    />
     <el-form :model="form" label-width="90px">
       <el-form-item label="店铺名称">
         <el-input v-model="form.shopName" maxlength="50" placeholder="如：小王的杂货铺" />
@@ -34,15 +44,20 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { shopApi } from '../api'
+import { useCopilotPrefillStore } from '../store/copilotPrefill'
 import ImageUploader from '../components/ImageUploader.vue'
 import ProductEditor from '../components/ProductEditor.vue'
 
 const router = useRouter()
+const prefillStore = useCopilotPrefillStore()
 const submitting = ref(false)
+
+/** 助手预填后的提示文案（v0.28）：让用户知道草稿哪来的、有几条要补全、提交要自己点 */
+const prefillNotice = ref('')
 const form = ref({
   shopName: '',
   description: '',
@@ -62,6 +77,55 @@ function addProduct() {
 /** 判断单个商品是否填写完整（标题 + 至少一个有效规格：规格名 + 价格） */
 function isValidProduct(p) {
   return !!(p.title && (p.skus || []).some(s => s.title && s.price != null && Number(s.price) > 0))
+}
+
+/**
+ * 消费助手交来的预填草稿（v0.28）。
+ *
+ * <p>用 {@code watch} + {@code immediate} 而不是只在 {@code onMounted} 里取：
+ * 用户点【填入表单】时**可能已经在本页**（组件不会再挂载），也可能是从别的页面跳过来的（挂载时取）。
+ * 两种都要接住。</p>
+ *
+ * <p>直接覆盖表单内容、不再弹二次确认：填入是用户刚刚在卡片上点过的**主动动作**，
+ * 而且覆盖的只是他自己尚未提交的草稿。项目在 Agent 安全设计里明确写过「确认疲劳是真实存在的」，
+ * 为一个可撤销的本地草稿再叠一层弹窗，只会稀释真正重要的那次确认。</p>
+ */
+watch(() => prefillStore.draft, (draft) => {
+  if (!draft) {
+    return
+  }
+  prefillStore.take()
+  applyPrefill(draft)
+}, { immediate: true })
+
+/** 把草稿写进表单。图片一律留空——图片必须是已上传的 URL，助手生成不了，由用户自己传 */
+function applyPrefill(draft) {
+  if (draft.shopName) {
+    form.value.shopName = draft.shopName
+  }
+  if (draft.description) {
+    form.value.description = draft.description
+  }
+  const products = (draft.products || []).map(p => ({
+    title: p.title || '',
+    subtitle: p.subtitle || '',
+    images: [],
+    description: p.description || '',
+    skus: (p.skus || []).map(s => ({
+      title: s.title || '',
+      price: s.price == null || s.price === '' ? null : Number(s.price),
+      qty: s.qty == null || s.qty === '' ? null : Number(s.qty)
+    }))
+  }))
+  if (products.length > 0) {
+    form.value.products = products
+  }
+  // 逐条统计"信息不全"：静默丢弃缺价格的条目会让用户察觉不到少了一条，如实提示更好
+  const incomplete = products.filter(p => !isValidProduct(p)).length
+  prefillNotice.value = `已按你提供的清单预填 ${products.length} 条商品`
+    + (incomplete > 0 ? `，其中 ${incomplete} 条信息不全（缺标题 / 规格名 / 价格），需补全后才能提交` : '')
+    + '。商品图片需要你自己上传。请核对标题与价格后，自己点「提交申请」。'
+  ElMessage.info('已填入助手解析的草稿，请核对后再提交')
 }
 
 /** 把共享表单结构转换为后端 SpuDTO（第一张图为主图，其余图挂到各 SKU；数量 NULL=不限量） */
@@ -125,6 +189,7 @@ onMounted(load)
 </script>
 
 <style scoped>
+.prefill-alert { margin-bottom: 16px; }
 .p-card { border: 1px solid #ebeef5; border-radius: 6px; padding: 12px; margin-bottom: 12px; background: #fafafa; }
 .p-head { display: flex; justify-content: space-between; margin-bottom: 8px; }
 </style>

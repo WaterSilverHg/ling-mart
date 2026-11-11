@@ -66,4 +66,41 @@ springdoc:
     enabled: ${SPRINGDOC_ENABLED:true}
     path: /swagger-ui.html
 
+# Seata 分布式事务客户端（2.5.0 AT 模式）
+# 本服务是分支事务参与者（事务根在 shop），配置与 order/shop/ware 保持一致：
+# tx-service-group 三处必须相同，否则注册到 TC 的分支找不到对应的全局事务。
+seata:
+  enabled: true
+  application-id: lingmart-product
+  tx-service-group: lingmart_tx_group
+  config:
+    type: file
+  # TC 地址发现方式：file=直连下面的 grouplist（默认，推荐） / nacos=从 Nacos 的 SEATA_GROUP 取
+  #
+  # 为什么默认 file：用 nacos 方式时，客户端拿到的是 TC **往 Nacos 注册的那个 IP**——TC 跑在容器里时
+  # 这个 IP 通常是 Docker 内网地址（如 172.18.0.9），宿主机上的服务根本路由不到，启动即报
+  # `register RM failed: can not connect to services-server`。直连模式完全绕开这件事：
+  # 客户端只认下面的 grouplist，TC 把自己注册成什么都不影响。
+  registry:
+    type: ${SEATA_REGISTRY_TYPE:file}
+    nacos:
+      server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+      group: SEATA_GROUP          # 与 TC 的 nacos.group 一致（仅 SEATA_REGISTRY_TYPE=nacos 时生效）
+      username: ${NACOS_USERNAME:nacos}
+      password: ${NACOS_PASSWORD:nacos}
+  service:
+    vgroup-mapping:
+      lingmart_tx_group: default
+    grouplist:
+      # 与 vgroup-mapping 里的集群名（default）对应：
+      #   本机开发（TC 容器把 8091 映射到宿主）→ 127.0.0.1:8091（默认）
+      #   业务服务跑容器内 → docker-compose.business.yml 覆盖为 seata-server:8091（compose 服务名直连）
+      default: ${SEATA_GROUPLIST:127.0.0.1:8091}
+
+# 直连模式下 Seata FileRegistry 真正读取的键名（等价于上面的 seata.service.grouplist.default）：
+# Seata 2.5 的 FileRegistryServiceImpl 读的是 `service.<集群>.grouplist`（见 ConfigurationKeys.GROUPLIST_POSTFIX），
+# 而 `seata.service.grouplist.*` 是 Spring 侧绑定形式。两种写法同时提供，避免因版本差异导致
+# ConfigNotFoundException: service.default.grouplist configuration item is required（多余的键无副作用）。
+service.default.grouplist: ${SEATA_GROUPLIST:127.0.0.1:8091}
+
 # 管理端点与链路追踪已移至 Nacos 共享配置（lingmart-common.yaml）

@@ -26,8 +26,9 @@ import java.util.Map;
  * （`docker compose down && up` 后匿名卷不复用、快照需 100 改/300s 才触发、无 AOF），
  * 一次常规的容器重建就会丢掉全部历史——"会悄悄丢历史的审计日志"比没有更危险，因为它会被信任。</p>
  *
- * <p><b>失败容忍</b>：所有写入都是 try-catch + 告警，绝不向上抛。Agent 是可选组件
- * （不纳入 verify-health.sh / 「全部服务」），不能因为审计库没建好就整个不可用。</p>
+ * <p><b>失败容忍</b>：所有写入都是 try-catch + 告警，绝不向上抛。审计是<b>附属能力</b>，
+ * 不该拖垮主链路——审计库没建好时助手照常能聊，只是不写审计（"库缺失"这件事由
+ * {@code verify-health.sh} 的库结构检查提前暴露，避免服务看着健康、实际审计静默失效）。</p>
  */
 @Slf4j
 @Service
@@ -37,7 +38,7 @@ public class AgentAuditService {
 
     /** 服务端向用户下发了操作意图（确认卡片） */
     public static final String EVENT_TOOL_PROPOSED = "tool_proposed";
-    /** 只读工具被服务端自动执行（阶段 3 预留） */
+    /** 只读工具被服务端执行（含命中短缓存、配额用尽两类未真正取数的情形） */
     public static final String EVENT_TOOL_RUN = "tool_run";
     /** 用户确认并执行了操作 */
     public static final String EVENT_USER_CONFIRMED = "user_confirmed";
@@ -47,6 +48,21 @@ public class AgentAuditService {
     public static final String EVENT_RECEIPT_REJECTED = "receipt_rejected";
     /** 一轮对话结束 */
     public static final String EVENT_TURN_COMPLETED = "turn_completed";
+    /**
+     * 前置路由闸门拦下了一轮（v0.30）：命中元请求/越狱模式，**未调用模型**。
+     *
+     * <p>作为独立事件类型而不是混进 {@code turn_completed}：它是"有人在试探"的信号，
+     * 排障与风控都要能一眼筛出来（同 {@code receipt_rejected} 的定位）。</p>
+     */
+    public static final String EVENT_PREROUTE_BLOCKED = "preroute_blocked";
+    /**
+     * 上下文地平线被推进（v0.30）：命中"忽略之前的指令"这类覆盖式话术，此后不再把
+     * 地平线之前的对话喂给模型。
+     *
+     * <p>记它是为了让"这一轮为什么像是失忆了"可回溯——重置对用户是无感的，
+     * 没有这条记录，排障时只能看到一个莫名其妙变短的上下文。</p>
+     */
+    public static final String EVENT_CONTEXT_RESET = "context_reset";
 
     /** 用户动作取值 */
     private static final String ACTION_CONFIRM = "confirm";
@@ -155,6 +171,33 @@ public class AgentAuditService {
         AgentAuditLog row = base(userId, sessionId, EVENT_TURN_COMPLETED);
         row.setResult(result);
         row.setErrorMsg(truncate(errorMsg, 500));
+        insert(row);
+    }
+
+    /**
+     * 记录一次「前置路由拦下」（v0.30）：命中元请求/越狱模式，本轮未调用模型。
+     *
+     * @param ruleId  命中的规则号（如 {@code meta.system-prompt}）。落的是规则号而不是用户的原文，
+     *                排障时能分清"是这条规则误伤了"还是"确实有人在试探"，而规则号本身不敏感
+     * @param message 用户原文（只存定长摘录，同 {@code recordToolProposed} 的口径）
+     */
+    public void recordPreRouteBlocked(Long userId, String sessionId, String ruleId, String message) {
+        AgentAuditLog row = base(userId, sessionId, EVENT_PREROUTE_BLOCKED);
+        row.setResult("blocked");
+        row.setErrorMsg(truncate("命中规则 " + ruleId, 500));
+        row.setMessageExcerpt(excerpt(message));
+        insert(row);
+    }
+
+    /**
+     * 记录一次「上下文地平线推进」（v0.30）。
+     *
+     * @param ruleId 命中的规则号（如 {@code override.ignore-instructions}）
+     */
+    public void recordContextReset(Long userId, String sessionId, String ruleId) {
+        AgentAuditLog row = base(userId, sessionId, EVENT_CONTEXT_RESET);
+        row.setResult("reset");
+        row.setErrorMsg(truncate("命中规则 " + ruleId, 500));
         insert(row);
     }
 

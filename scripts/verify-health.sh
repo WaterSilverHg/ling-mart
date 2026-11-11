@@ -1,9 +1,11 @@
 #!/bin/bash
 # ============================================================
-# 轻营 · 一键健康巡检（基础设施 + 核心业务服务）
+# 轻营 · 一键健康巡检（基础设施 + 全部业务服务）
 # 用法：bash scripts/verify-health.sh
-# 覆盖：Nacos / MySQL / Redis / ES / RabbitMQ / Seata / Zipkin + 8 个核心服务 /actuator/health
-# 不含：lingmart-agent（可选 AI 组件，需外部模型 Key 与 ChromaDB，故不纳入默认巡检）
+# 覆盖：Nacos / MySQL / Redis / ES / RabbitMQ / Seata / Zipkin / ChromaDB / Prometheus / Grafana
+#       + 9 个业务服务 /actuator/health
+# 说明：v0.30 起 lingmart-agent 纳入必要模块（此前被当作可选 AI 组件排除在外）。
+#       它的启动前置（两把模型 Key / ChromaDB / 审计库）都在这份巡检的覆盖范围内。
 # 退出码：全部通过 = 0；任一失败 = 1
 # 可覆盖：NACOS_ADDR / NACOS_USER / NACOS_PASS（默认 nacos/nacos）
 # ============================================================
@@ -108,6 +110,7 @@ SELECT CONCAT(table_schema,'.',table_name) FROM information_schema.tables
     OR (table_schema='lingmart_ware'    AND table_name IN ('stock_flow_log'))
     OR (table_schema='lingmart_product' AND table_name IN ('es_write_retry','sale_rollback_log'))
     OR (table_schema='lingmart_shop'    AND table_name IN ('shop'))
+    OR (table_schema='lingmart_agent'   AND table_name IN ('agent_audit_log'))
 UNION ALL
 SELECT CONCAT(table_schema,'.',table_name,'.',index_name) FROM information_schema.statistics
  WHERE (table_schema='lingmart_shop'  AND table_name='shop' AND index_name='uk_user_id')
@@ -121,13 +124,14 @@ SQL
         MISSING=""
         for item in lingmart_order.order_paid_event lingmart_ware.stock_flow_log \
                     lingmart_product.es_write_retry lingmart_product.sale_rollback_log \
-                    lingmart_shop.shop.uk_user_id lingmart_order.cart.uk_buyer_sku; do
+                    lingmart_shop.shop.uk_user_id lingmart_order.cart.uk_buyer_sku \
+                    lingmart_agent.agent_audit_log; do
             echo "$DB_META" | grep -qx "$item" || MISSING="$MISSING $item"
         done
         if [ -n "$MISSING" ]; then
-            bad "库结构      缺对象：$MISSING（按 docs/ops-checklist.md 第三节补迁移；order 服务会因此启动/支付报错）"
+            bad "库结构      缺对象：$MISSING（按 docs/ops-checklist.md 第三节补迁移；order 服务会因此启动/支付报错，agent 缺审计表则审计静默失效）"
         else
-            ok "库结构      关键表与唯一键齐全（order_paid_event / stock_flow_log / es_write_retry / sale_rollback_log / uk_user_id / uk_buyer_sku）"
+            ok "库结构      关键表与唯一键齐全（order_paid_event / stock_flow_log / es_write_retry / sale_rollback_log / uk_user_id / uk_buyer_sku / agent_audit_log）"
         fi
     else
         bad "库结构      查询失败（${DB_META%%$'\n'*}）"
@@ -164,10 +168,34 @@ SQL
     # Zipkin：UI http://localhost:9411（链路追踪）
     # 自 v0.11 起 zipkin 随 `docker compose up -d` 默认启动、ZIPKIN_ENABLED 默认 true（全链路上报开箱可用），
     # 故此处的「未启动」属于真异常而非可选跳过。
-    if curl -sf --max-time 4 http://localhost:9411 >/dev/null 2>&1; then
-        ok "Zipkin      http://localhost:9411"
+    # 探活用 /health 而不是根路径：存储已切到 Elasticsearch，ES 挂掉时根路径仍返回 200、
+    # 但 /health 顶层 status 会变 DOWN——只探根路径会漏掉「追踪写不进去」这种情况。
+    if curl -sf --max-time 4 http://localhost:9411/health 2>/dev/null | grep -q '"status"[[:space:]]*:[[:space:]]*"UP"'; then
+        ok "Zipkin      http://localhost:9411（存储：Elasticsearch）"
     else
-        bad "Zipkin      http://localhost:9411（未启动；应随 docker compose up -d 一起起来）"
+        bad "Zipkin      http://localhost:9411（未启动或存储不可用；检查 lingmart-elasticsearch 是否在跑）"
+    fi
+
+    # Prometheus：自身健康 + 抓取目标状态
+    if curl -sf --max-time 4 http://localhost:9090/-/healthy >/dev/null 2>&1; then
+        UP_COUNT=$(curl -s --max-time 4 http://localhost:9090/api/v1/targets 2>/dev/null \
+            | grep -o '"health":"up"' | wc -l | tr -d ' ')
+        TOTAL=$(curl -s --max-time 4 http://localhost:9090/api/v1/targets 2>/dev/null \
+            | grep -o '"health":"' | wc -l | tr -d ' ')
+        if [ "${TOTAL:-0}" -gt 0 ] && [ "${UP_COUNT:-0}" -lt "${TOTAL:-0}" ]; then
+            bad "Prometheus  http://localhost:9090（targets up $UP_COUNT/$TOTAL，有服务未被抓取）"
+        else
+            ok "Prometheus  http://localhost:9090（targets up ${UP_COUNT:-0}/${TOTAL:-0}）"
+        fi
+    else
+        bad "Prometheus  http://localhost:9090（未启动；应随 docker compose up -d 一起起来）"
+    fi
+
+    # Grafana：/api/health 无需登录
+    if curl -sf --max-time 4 http://localhost:3000/api/health >/dev/null 2>&1; then
+        ok "Grafana     http://localhost:3000（admin / GRAFANA_ADMIN_PASSWORD）"
+    else
+        bad "Grafana     http://localhost:3000（未启动）"
     fi
 fi
 
@@ -175,7 +203,7 @@ fi
 echo ""
 echo "[业务服务]"
 # name:port 列表（网关必须最后检查，其余无先后）
-for svc in auth:8000 shop:8100 product:10001 ware:11000 order:9000 search:12000 chat:13000 gateway:88; do
+for svc in auth:8000 shop:8100 product:10001 ware:11000 order:9000 search:12000 chat:13000 agent:14000 gateway:88; do
     name="${svc%%:*}"
     port="${svc##*:}"
     if curl -sf --max-time 4 "http://localhost:$port/actuator/health" 2>/dev/null | grep -q '"UP"'; then

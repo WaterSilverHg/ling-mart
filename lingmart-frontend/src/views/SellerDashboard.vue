@@ -97,7 +97,7 @@
             <div v-else-if="o.refundStatus === 3" class="o-refund">退款已拒绝：{{ o.refundRejectReason }}</div>
           </div>
           <el-tag :type="o.refundStatus === 1 ? 'warning' : (o.orderStatus === 1 ? 'primary' : 'info')">{{ o.refundStatus === 1 ? '退款处理中' : (o.orderStatus === 1 ? '待发货' : statusText(o.orderStatus)) }}</el-tag>
-          <el-button v-if="o.orderStatus === 1" size="small" type="success" @click="ship(o)">发货</el-button>
+          <el-button v-if="o.orderStatus === 1" size="small" type="success" @click="openShip(o)">发货</el-button>
         </div>
         <el-pagination v-if="sellerOrdersTotal > sellerOrdersSize" class="pager" background layout="prev, pager, next" :total="sellerOrdersTotal"
                        :page-size="sellerOrdersSize" :current-page="sellerOrdersPage" @current-change="onSellerOrdersPage" />
@@ -166,6 +166,33 @@
       <template #footer>
         <el-button @click="stockVisible = false">取消</el-button>
         <el-button type="primary" @click="submitStock">保存库存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 发货（v0.27）：必须选择发货方式；选「快递发货」才需要公司与运单号 -->
+    <el-dialog v-model="shipVisible" title="发货" width="460px">
+      <el-form label-width="90px">
+        <el-form-item label="订单号">
+          <span class="ship-sn">{{ shipForm.orderSn }}</span>
+        </el-form-item>
+        <el-form-item label="发货方式">
+          <el-radio-group v-model="shipForm.deliveryMode">
+            <el-radio :value="1">快递发货</el-radio>
+            <el-radio :value="2">无需物流（自提 / 面交）</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <template v-if="shipForm.deliveryMode === 1">
+          <el-form-item label="快递公司">
+            <el-input v-model="shipForm.shippingCompany" maxlength="50" placeholder="如：顺丰速运" />
+          </el-form-item>
+          <el-form-item label="运单号">
+            <el-input v-model="shipForm.trackingNo" maxlength="64" placeholder="如：SF1234567890" />
+          </el-form-item>
+        </template>
+      </el-form>
+      <template #footer>
+        <el-button @click="shipVisible = false">取消</el-button>
+        <el-button type="primary" :loading="shipSaving" @click="submitShip">确认发货</el-button>
       </template>
     </el-dialog>
   </div>
@@ -377,10 +404,39 @@ function onSellerOrdersPage(p) {
   loadOrders()
 }
 
-async function ship(o) {
-  await orderApi.ship(o.orderSn)
-  ElMessage.success('已发货')
-  loadOrders()
+// ============ 发货（v0.27：需选择发货方式） ============
+const shipVisible = ref(false)
+const shipSaving = ref(false)
+// deliveryMode：1 快递 / 2 无需物流（与后端 Order 的 delivery_mode 取值一致）
+const shipForm = ref({ orderSn: '', deliveryMode: 1, shippingCompany: '', trackingNo: '' })
+
+function openShip(o) {
+  // 每次打开都重置，避免上一条订单的公司/单号残留到这一条
+  shipForm.value = { orderSn: o.orderSn, deliveryMode: 1, shippingCompany: '', trackingNo: '' }
+  shipVisible.value = true
+}
+
+async function submitShip() {
+  const f = shipForm.value
+  const isExpress = f.deliveryMode === 1
+  if (isExpress && (!f.shippingCompany.trim() || !f.trackingNo.trim())) {
+    ElMessage.warning('快递发货需填写快递公司与运单号')
+    return
+  }
+  shipSaving.value = true
+  try {
+    await orderApi.ship(f.orderSn, {
+      deliveryMode: f.deliveryMode,
+      // 无需物流时后端要求两者为空，这里显式传 null
+      shippingCompany: isExpress ? f.shippingCompany.trim() : null,
+      trackingNo: isExpress ? f.trackingNo.trim() : null
+    })
+    ElMessage.success('已发货')
+    shipVisible.value = false
+    loadOrders()
+  } finally {
+    shipSaving.value = false
+  }
 }
 
 async function reviewRefund(o, approve) {
@@ -510,6 +566,7 @@ onBeforeUnmount(disposeCharts)
 .price { color: #f56c6c; font-weight: 600; }
 .stock-infinite { color: #909399; }
 .stock-tip { color: #909399; font-size: 12px; margin-bottom: 8px; }
+.ship-sn { color: #606266; font-family: Consolas, Menlo, monospace; }
 .order-row { display: flex; align-items: center; gap: 16px; background: #fafafa; padding: 12px 16px; border-radius: 6px; margin-bottom: 10px; }
 .o-info { flex: 1; }
 .o-sn { font-size: 12px; color: #909399; }

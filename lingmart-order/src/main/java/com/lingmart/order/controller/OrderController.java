@@ -10,6 +10,7 @@ import com.lingmart.order.dto.OrderCreateDTO;
 import com.lingmart.order.dto.OrderExportRow;
 import com.lingmart.order.dto.RefundRequestDTO;
 import com.lingmart.order.dto.RefundReviewDTO;
+import com.lingmart.order.dto.ShipDTO;
 import com.lingmart.order.service.OrderService;
 import com.lingmart.order.vo.OrderDetailVO;
 import com.lingmart.order.vo.SellerStatsVO;
@@ -72,12 +73,13 @@ public class OrderController {
     }
 
     /**
-     * 卖家发货。
+     * 卖家发货（v0.27 起需指定发货方式；选快递时另需快递公司与运单号）。
      */
     @PostMapping("/{orderSn}/ship")
     public R<Void> ship(@PathVariable("orderSn") String orderSn,
+                        @Valid @RequestBody ShipDTO dto,
                         @RequestHeader(value = AuthConstants.HEADER_USER_ID, required = false) Long userId) {
-        orderService.ship(userId, orderSn);
+        orderService.ship(userId, orderSn, dto);
         return R.ok();
     }
 

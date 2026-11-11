@@ -43,13 +43,23 @@
 //   想让它计入失败：-e COUNT_429_AS_FAILURE=1。想真正压搜索：把上面三处 count 调大并
 //   scripts/push-nacos-config.sh 推送（见 docs/load-testing.md 第八节）。
 //
+// 【报告口径：先看哪几个数】（v0.36 起）
+//   http_ok_requests...........有效吞吐。rate 即"每秒真正被服务成功的请求数"，**不含 429**
+//   http_429_throttled.........被限流的请求量；限流占比 = 429 / (有效 + 429)
+//   http_ok_duration{flow}.....成功请求的延迟分布——**报 p95 只看这个**
+//   http_429_duration{flow}....429 的延迟分布（通常极低）——用它解释"为什么 p95 反而下降"
+//   business_errors{flow,reason}...业务失败（HTTP 200 但 code≠200）按原因归类
+//   http_ok_requests{flow} ÷ flow_iterations{flow} = 每个 iteration 实际发了几个请求
+//   ⚠️ http_req_duration 仍然包含 429（且 429 被标记为 expected response），
+//      不要拿它的 p95 下结论——那正是"并发越高越快"假象的来源。
+//
 // 【pay 场景会留下已支付订单】已支付的订单不能再取消（业务上就该如此），所以每条
 //   pay 迭代会留一行"已完成"数据。它**不影响库存**（优先选不限量 SKU，库存数学全跳过），
 //   压测后跑 teardown 清理即可。order/cart 场景是闭环的，不留数据。
 // =============================================================
 import http from 'k6/http';
 import { check, sleep, fail } from 'k6';
-import { Counter } from 'k6/metrics';
+import { Counter, Trend } from 'k6/metrics';
 
 /**
  * 被 Sentinel 限流（429）的请求数，单独计一笔。
@@ -60,6 +70,52 @@ import { Counter } from 'k6/metrics';
  * 但看报告像是服务出了问题。</p>
  */
 const throttled429 = new Counter('http_429_throttled');
+
+/**
+ * 成功请求（HTTP 2xx 且业务 code=200）的延迟与计数。
+ *
+ * <p><b>为什么不能直接用 http_req_duration</b>：429 是被限流快速拒绝的响应（通常几十毫秒），
+ * 混进同一个分布会把 p95 往下拉——出现"并发越高、延迟越低"的假象。而本脚本又把 429 用
+ * `http.expectedStatuses` 标成了"预期响应"，所以连 `http_req_duration{expected_response:true}`
+ * 也排除不掉它。因此单独记一份**只含成功请求**的分布。</p>
+ *
+ * <p>"有效吞吐"看 `http_ok_requests` 的 rate，而不是 `http_reqs`——后者把 429 也算进去了。</p>
+ */
+const httpOkDuration = new Trend('http_ok_duration', true);
+const httpOkRequests = new Counter('http_ok_requests');
+/** 429 的独立延迟分布：用来证明"平均延迟下降"来自快速拒绝，而不是系统变快。 */
+const throttledDuration = new Trend('http_429_duration', true);
+/**
+ * 业务失败（HTTP 2xx 但 R.code != 200）计数，标签为 flow + code + **归类后**的原因。
+ *
+ * <p>原因必须先归类再打标签：原始 msg 常带订单号、skuId 等动态值，直接当标签会造成基数爆炸。</p>
+ */
+const businessErrors = new Counter('business_errors');
+/** 各 flow 实际执行的迭代数；与 http_ok_requests 相除即"每 iteration 发了几个请求"。 */
+const flowIterations = new Counter('flow_iterations');
+
+/** 业务错误归类表：新增失败类型时在这里补一行。 */
+const ERROR_REASONS = [
+  [/库存不足/, 'stock_shortage'],
+  [/不能购买自己店铺/, 'self_purchase'],
+  [/一次下单仅支持同一店铺/, 'multi_shop'],
+  [/商品不存在/, 'sku_missing'],
+  [/订单状态不允许|状态不允许/, 'invalid_state'],
+  [/幂等/, 'idempotency'],
+  [/限流|频繁|too many/i, 'throttled'],
+  [/超时|timeout|timed out/i, 'timeout'],
+];
+
+function classifyReason(msg) {
+  if (!msg) return 'unknown';
+  for (const [re, label] of ERROR_REASONS) {
+    if (re.test(msg)) return label;
+  }
+  return 'other';
+}
+
+/** 响应 JSON 缓存：req() 与各 flow 会多次读同一个响应，避免重复 JSON.parse（压测机自己也会成为瓶颈）。 */
+const jsonCache = new WeakMap();
 
 /**
  * 默认把 **429 视为"预期内的限流响应"**，不计入 `http_req_failed`。
@@ -79,8 +135,29 @@ if (!COUNT_429_AS_FAILURE) {
 /** 统一的请求出口：只为把 429 单独计一笔；其余行为与直接调 http.* 完全一致 */
 function req(method, url, body, params) {
   const res = http.request(method, url, body, params);
+  const flow = (params && params.tags && params.tags.flow) || 'unknown';
+
+  // 429：单独计数 + 单独记录延迟，不进入成功请求的分布
   if (res.status === 429) {
-    throttled429.add(1, { flow: (params && params.tags && params.tags.flow) || 'unknown' });
+    throttled429.add(1, { flow });
+    throttledDuration.add(res.timings.duration, { flow });
+    return res;
+  }
+
+  const j = toJson(res); // 结果缓存在 WeakMap，后续 flow 复用，不重复解析
+  const httpOk = res.status >= 200 && res.status < 300;
+  const bizOk = !j || typeof j.code !== 'number' || j.code === 200;
+
+  if (httpOk && bizOk) {
+    httpOkDuration.add(res.timings.duration, { flow });
+    httpOkRequests.add(1, { flow });
+  } else {
+    // HTTP 非 2xx，或 HTTP 200 但业务码失败——两类都算"没服务成功"
+    businessErrors.add(1, {
+      flow,
+      code: j && typeof j.code === 'number' ? String(j.code) : String(res.status),
+      reason: classifyReason((j && j.msg) || (httpOk ? 'unknown' : `http_${res.status}`)),
+    });
   }
   return res;
 }
@@ -121,16 +198,28 @@ const W_PAY = Number(__ENV.W_PAY || 10);
 // 分链路门槛：子指标被 thresholds 引用后才会出现在默认汇总里，这就是"分链路 p95"的来源
 const thresholds = {
   http_req_failed: [`rate<${FAIL_RATE}`],
-  http_req_duration: [`p(95)<${P95_MS}`],
-  'http_req_duration{flow:read}': ['p(95)<500'],
-  'http_req_duration{flow:cart}': [`p(95)<${P95_MS}`],
-  'http_req_duration{flow:order}': ['p(95)<1500'],
-  'http_req_duration{flow:pay}': ['p(95)<1500'],
+  // 延迟门槛只看**成功请求**（http_ok_duration）。刻意不用 http_req_duration：
+  // 它混入了 429 的快速拒绝，会把 p95 拉低，制造"并发越高越快"的假象。
+  'http_ok_duration{flow:read}': ['p(95)<500'],
+  'http_ok_duration{flow:cart}': [`p(95)<${P95_MS}`],
+  'http_ok_duration{flow:order}': ['p(95)<1500'],
+  'http_ok_duration{flow:pay}': ['p(95)<1500'],
   'http_req_failed{flow:read}': [`rate<${FAIL_RATE}`],
   'http_req_failed{flow:cart}': [`rate<${FAIL_RATE}`],
   'http_req_failed{flow:order}': [`rate<${FAIL_RATE}`],
   'http_req_failed{flow:pay}': [`rate<${FAIL_RATE}`],
   checks: ['rate>0.95'],
+  // 以下门槛恒真（count>=0），唯一作用是把这些分链路计数带进默认汇总：
+  //   http_ok_requests{flow} / flow_iterations{flow} = 每个 iteration 实际发了几个请求
+  //   http_ok_requests 的 rate = 有效吞吐（不含 429）
+  'http_ok_requests{flow:read}': ['count>=0'],
+  'http_ok_requests{flow:cart}': ['count>=0'],
+  'http_ok_requests{flow:order}': ['count>=0'],
+  'http_ok_requests{flow:pay}': ['count>=0'],
+  'flow_iterations{flow:read}': ['count>=0'],
+  'flow_iterations{flow:cart}': ['count>=0'],
+  'flow_iterations{flow:order}': ['count>=0'],
+  'flow_iterations{flow:pay}': ['count>=0'],
 };
 
 export const options = {
@@ -208,6 +297,7 @@ export default function (data) {
   const headers = { Authorization: `Bearer ${token}` };
 
   const flow = pickFlow();
+  flowIterations.add(1, { flow });
   if (flow === 'read') {
     readFlow(headers);
   } else if (flow === 'cart') {
@@ -443,13 +533,18 @@ function assert(res, sets, tags) {
 }
 
 function toJson(res) {
-  if (!res || !res.body || res.body.length === 0) return null;
-  try {
-    return res.json();
-  } catch (e) {
-    console.warn(`响应不是合法 JSON（HTTP ${res.status}）：${String(res.body).slice(0, 120)}`);
-    return null;
+  if (!res) return null;
+  if (jsonCache.has(res)) return jsonCache.get(res);
+  let parsed = null;
+  if (res.body && res.body.length > 0) {
+    try {
+      parsed = res.json();
+    } catch (e) {
+      console.warn(`响应不是合法 JSON（HTTP ${res.status}）：${String(res.body).slice(0, 120)}`);
+    }
   }
+  jsonCache.set(res, parsed);
+  return parsed;
 }
 
 function dataOf(res) {

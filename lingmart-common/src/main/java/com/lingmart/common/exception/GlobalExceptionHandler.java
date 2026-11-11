@@ -1,7 +1,9 @@
 package com.lingmart.common.exception;
 
+import com.lingmart.common.constant.AuthConstants;
 import com.lingmart.common.result.R;
 import com.lingmart.common.result.ResultCode;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -32,12 +34,20 @@ public class GlobalExceptionHandler {
     /**
      * 处理业务异常。
      *
-     * @param e 业务异常
+     * <p><b>日志为什么带上 method/path/userId</b>：只打 code + msg 时，"库存不足"这四个字
+     * 既不知道发生在哪个接口，也不知道是谁触发的；压测报告里出现"下单失败 N 个"就只能靠猜。
+     * 带上这三个字段后，可以直接按接口与用户聚合，再配合 traceId 串到 Zipkin 与上下游日志。
+     * 注意仍**不打印请求体**（可能含用户输入），只记录路由与身份。</p>
+     *
+     * @param e       业务异常
+     * @param request 当前请求（用于补充路由与用户）
      * @return 携带业务错误码的失败响应
      */
     @ExceptionHandler(BizException.class)
-    public R<Void> handleBizException(BizException e) {
-        log.warn("业务异常：code={}, msg={}", e.getCode(), e.getMessage());
+    public R<Void> handleBizException(BizException e, HttpServletRequest request) {
+        log.warn("业务异常：code={}, msg={}, {} {}, userId={}",
+                e.getCode(), e.getMessage(), request.getMethod(), request.getRequestURI(),
+                request.getHeader(AuthConstants.HEADER_USER_ID));
         return R.fail(e.getCode(), e.getMessage());
     }
 

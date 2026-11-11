@@ -16,10 +16,22 @@
         <span class="price">¥{{ item.price }}</span>
       </div>
       <div class="foot">
+        <!-- 收货信息：下单快照。v0.39 之前的存量订单没有该字段，这里不渲染 -->
+        <div v-if="o.receiverName" class="receiver">
+          收货：{{ o.receiverName }} {{ o.receiverPhone }} · {{ o.receiverFullAddress }}
+        </div>
         <span class="amount">合计：<b class="price">¥{{ o.totalAmount }}</b></span>
         <span class="time">下单时间：{{ formatTime(o.createTime) }}</span>
+        <div v-if="o.shipTime" class="ship-info">
+          <template v-if="o.deliveryMode === 1">
+            物流：{{ o.shippingCompany }} <span class="tracking">{{ o.trackingNo }}</span>
+          </template>
+          <template v-else-if="o.deliveryMode === 2">无需物流（自提 / 面交）</template>
+          <!-- 兼容本次升级前已发货的存量订单：那时还没有发货方式字段 -->
+          <template v-else>已发货</template>
+        </div>
         <div v-if="o.refundStatus" class="refund-info">
-          <template v-if="o.refundStatus === 1">退款处理中</template>
+          <template v-if="o.refundStatus === 1">退款处理中（卖家 24 小时未处理将自动退款）</template>
           <template v-else-if="o.refundStatus === 2">已退款</template>
           <template v-else-if="o.refundStatus === 3">退款被拒<span v-if="o.refundRejectReason">：{{ o.refundRejectReason }}</span></template>
           <span v-if="o.refundReason">（申请原因：{{ o.refundReason }}）</span>
@@ -140,5 +152,8 @@ onMounted(load)
 .amount { font-size: 14px; }
 .time { color: #909399; font-size: 12px; }
 .refund-info { color: #e6a23c; font-size: 12px; flex: 1; }
+.receiver { color: #909399; font-size: 12px; flex: 1; }
+.ship-info { color: #909399; font-size: 12px; flex: 1; }
+.ship-info .tracking { color: #409eff; font-family: Consolas, Menlo, monospace; }
 .pager { margin-top: 16px; display: flex; justify-content: center; }
 </style>

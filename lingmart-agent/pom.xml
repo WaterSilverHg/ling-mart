@@ -39,6 +39,17 @@
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
+        <!-- 文档解析：读取用户上传的 .xlsx / .docx（开店材料）。
+             用 poi-ooxml 而非 easyexcel：docx 本来就只有 POI 能读（XWPFDocument），
+             而 xlsx 侧 DataFormatter 能直接给出"Excel 里显示的值"（数字/日期/公式都按格式渲染），
+             省掉 EasyExcel 行级 API 里把 Cell 强转 CellData 再自行格式化的那一步。
+             版本与 lingmart-order 经 easyexcel 传递引入的 POI 对齐（父 POM 统一管理），
+             其内置的 ZipSecureFile 最小解压比校验对 xlsx/docx 的 zip 炸弹有兜底。 -->
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-ooxml</artifactId>
+        </dependency>
+
         <!-- 服务注册与发现（Nacos） -->
         <dependency>
             <groupId>com.alibaba.cloud</groupId>

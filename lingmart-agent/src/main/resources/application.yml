@@ -47,8 +47,11 @@ spring:
       port: ${REDIS_PORT:6380}
   # MySQL：仅用于「操作审计日志」（lingmart_agent 库，本服务独占）
   #   ⚠️ initialization-fail-timeout: -1 = 连接池启动时连不上也**不阻断应用启动**。
-  #   Agent 是可选组件（不纳入 verify-health.sh / 「全部服务」），不能因为审计库没建好就整体起不来；
-  #   审计写入失败由 AgentAuditService 兜住（只告警）。
+  #   Agent 已纳入必要模块（v0.30 起进「全部服务」与 verify-health.sh），但这条容错仍然保留：
+  #   **审计是附属能力，不该拖垮主链路**——库没建好时应做到"助手照常能聊、只是不写审计"，
+  #   而不是整个服务起不来（对比：其它服务的业务库缺失就该启动失败，那是它们的必需依赖）。
+  #   审计写入失败由 AgentAuditService 兜住（只告警）；"审计库缺失"这件事由 verify-health.sh
+  #   的「库结构」检查提前暴露，避免服务看着健康、实际审计静默失效。
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3307}/lingmart_agent?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
@@ -56,6 +59,15 @@ spring:
     password: ${DB_PASSWORD:root}
     hikari:
       initialization-fail-timeout: -1
+  # 文件上传：Boot 默认只允许 1MB，而开店材料（xlsx/docx）很容易超过——
+  # 不显式配置会在进到控制器之前就被 Tomcat 挡掉，且报的是框架级错误。
+  # 与 lingmart.agent.document.max-file-size 保持一致（那道是业务校验，给出带数值的友好提示）。
+  # request-size 要比 file-size 略大：整个 multipart 请求还包含边界与头部开销，
+  # 两者设为同值时，一个"刚好 2MB"的文件会因为这点开销连带被拒。
+  servlet:
+    multipart:
+      max-file-size: ${AGENT_DOC_MAX_FILE_SIZE:2MB}
+      max-request-size: ${AGENT_DOC_MAX_REQUEST_SIZE:3MB}
   # 底层 HTTP 客户端超时（Boot 会把带超时的 RestClient.Builder 交给 Spring AI 的 chat/embedding 装配使用）：
   # 在 TCP/HTTP 层主动掐断长时间无响应的请求。虚拟线程上 Future.cancel 无法中断底层 HTTP 调用，
   # 仅靠它会残留“僵尸连接”；read-timeout 建议 ≥ lingmart.agent.llm-timeout-ms，让友好超时提示先触发。
@@ -136,6 +148,28 @@ lingmart:
       max-result-chars: ${AGENT_READONLY_MAX_RESULT_CHARS:1500}        # 工具返回文本上限
       # 经网关调用业务 API（案 B）：Agent 只透传用户 JWT，不做权限判断——鉴权仍是网关+业务服务一份
       gateway-base-url: ${AGENT_GATEWAY_BASE_URL:http://localhost:88}
+    # 用户上传文档（开店材料）：上传时解码成文本存进本会话，发送时注入当轮 prompt。
+    # 正文不进消息体、不进会话历史，因此不受 max-message-length 限制——这正是长清单能发出去的前提。
+    document:
+      enabled: ${AGENT_DOC_ENABLED:true}
+      # 单文件字节上限。需与 spring.servlet.multipart.max-file-size 一致
+      max-file-size: ${AGENT_DOC_MAX_FILE_SIZE:2MB}
+      # 抽取文本上限：既是存储上限，也是注入模型的量
+      max-chars: ${AGENT_DOC_MAX_CHARS:8000}
+      # 表格类文件最多读取行数（超出即停止解析）
+      max-rows: ${AGENT_DOC_MAX_ROWS:500}
+      # 每用户每分钟上传次数
+      rate-per-minute: ${AGENT_DOC_RATE_PER_MINUTE:5}
+    # 四层约束策略（v0.30）：前置路由 / 白名单 / 角色重置 / 注意力锚定。
+    # 关掉任一项都不会失去安全底线（底线始终是"能力最小化"：写操作必须用户确认、
+    # 只读工具参数里没有主体字段）；这几层的作用是**把判断权从模型手里拿回来**——
+    # 能不能受理、要不要继承先前对话，本来就不必交给模型去纠结。
+    # 三个子开关的用途是"哪一层出问题就单独关掉定位"，不必回滚代码。
+    constraint:
+      enabled: ${AGENT_CONSTRAINT_ENABLED:true}                       # 总开关（关=回到纯提示词约束）
+      pre-route-enabled: ${AGENT_PREROUTE_ENABLED:true}               # 前置路由：命中元请求直接回文案，不调用模型
+      reset-on-override: ${AGENT_RESET_ON_OVERRIDE:true}              # 角色重置：命中覆盖式话术则推进上下文地平线
+      attention-digest: ${AGENT_ATTENTION_DIGEST:true}                # 注意力锚定：每轮消息末尾重复硬约束提要
     # 输入约束与限流
     max-message-length: ${AGENT_MAX_MESSAGE_LENGTH:2000}  # 用户消息最大字符数
     max-context-chars: ${AGENT_MAX_CONTEXT_CHARS:30000}   # 拼给模型的“历史+当前”字符预算，超出裁剪最旧（近似防超窗）

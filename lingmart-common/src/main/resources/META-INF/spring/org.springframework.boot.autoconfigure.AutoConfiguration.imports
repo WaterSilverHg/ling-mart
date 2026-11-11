@@ -1,2 +1,6 @@
 com.lingmart.common.jwt.JwtSecretValidatorAutoConfiguration
 com.lingmart.common.jackson.LongJsonAutoConfiguration
+com.lingmart.common.seata.SeataXidPropagationAutoConfiguration
+com.lingmart.common.tracing.ActuatorObservationAutoConfiguration
+com.lingmart.common.web.PageSizeCapAutoConfiguration
+com.lingmart.common.security.DefaultCredentialGuardAutoConfiguration

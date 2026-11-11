@@ -48,6 +48,7 @@ import com.lingmart.product.vo.SkuDetailVO;
 import com.lingmart.product.vo.SkuStockVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DuplicateKeyException;
@@ -66,6 +67,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -119,6 +121,10 @@ public class ProductServiceImpl implements ProductService {
 
     /** 店铺改名后重建 ES 文档的上限（防止超大店铺一次全量重索引） */
     private static final int SHOP_REINDEX_MAX = 1000;
+
+    /** 反向对账单次扫描的 ES 文档上限（防止一次拉全索引把内存打满） */
+    @Value("${lingmart.es.ghost-scan-limit:1000}")
+    private int ghostScanLimit;
 
     /**
      * 卖家发布商品：SPU + SKU + 库存同步。
@@ -686,7 +692,7 @@ public class ProductServiceImpl implements ProductService {
         if (spuIds.isEmpty()) {
             return;
         }
-        Map<Long, Spu> spuMap = spuMapper.selectBatchIds(spuIds).stream()
+        Map<Long, Spu> spuMap = spuMapper.selectByIds(spuIds).stream()
                 .filter(spu -> Objects.equals(spu.getStatus(), SPU_ON))
                 .collect(Collectors.toMap(Spu::getId, spu -> spu));
 
@@ -741,6 +747,52 @@ public class ProductServiceImpl implements ProductService {
         if (indexed > 0) {
             log.info("ES 对账完成：补索引 {} 个在售商品", indexed);
         }
+        int removed = removeGhostDocs();
+        if (removed > 0) {
+            log.info("ES 反向对账完成：清理 {} 个幽灵文档", removed);
+        }
+    }
+
+    /**
+     * 反向对账：删除「ES 有、但 DB 中不该再出现」的幽灵文档。
+     *
+     * <p><b>为什么需要</b>：Seata AT 一阶段先把本地分支提交（含 ES 写入），全局回滚只撤销 DB、
+     * 不会撤销 ES。于是搜索里会留下点进去「商品不存在」的文档，而正向对账只做「补缺失」，
+     * 永远清不掉它们。</p>
+     *
+     * <p>判定口径与检索一致：SPU 必须存在、已上架（status=1）、审核通过（reviewStatus=1）。
+     * 任一不满足即删除该 ES 文档。只扫描前 {@code lingmart.es.ghost-scan-limit} 条；
+     * ES 不可用时 {@code findAllIds} 返回空列，本轮直接跳过。</p>
+     */
+    private int removeGhostDocs() {
+        List<String> esIds = esProductService.findAllIds(ghostScanLimit);
+        if (esIds.isEmpty()) {
+            return 0;
+        }
+        List<Long> ids = new ArrayList<>(esIds.size());
+        for (String esId : esIds) {
+            try {
+                ids.add(Long.valueOf(esId));
+            } catch (NumberFormatException ignore) {
+                // id 不是雪花数字 → 不是本服务写入的文档，不碰，避免误删
+            }
+        }
+        if (ids.isEmpty()) {
+            return 0;
+        }
+        Set<Long> alive = spuMapper.selectByIds(ids).stream()
+                .filter(s -> Objects.equals(s.getStatus(), SPU_ON)
+                        && Objects.equals(s.getReviewStatus(), REVIEW_APPROVED))
+                .map(Spu::getId)
+                .collect(Collectors.toSet());
+        int removed = 0;
+        for (Long id : ids) {
+            if (!alive.contains(id)) {
+                esProductService.delete(id.toString());
+                removed++;
+            }
+        }
+        return removed;
     }
 
     // ==================== 私有辅助方法 ====================

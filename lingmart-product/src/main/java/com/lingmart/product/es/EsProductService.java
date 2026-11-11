@@ -6,7 +6,10 @@ import com.lingmart.product.entity.EsWriteRetry;
 import com.lingmart.product.mapper.EsWriteRetryMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
+import org.springframework.data.elasticsearch.core.SearchHit;
+import org.springframework.data.elasticsearch.core.query.Query;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -98,6 +101,27 @@ public class EsProductService {
         } catch (Exception e) {
             log.warn("检查 ES 文档存在性失败（对账跳过该条）：spuId={}, err={}", spuId, e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * 列出索引里的文档 ID（最多 {@code limit} 条），供**反向对账**使用。
+     *
+     * <p>正向对账只能补「DB 有、ES 无」，清不掉「ES 有、DB 不该有」的幽灵文档
+     * （典型来源：全局事务回滚后 `approveInternal` 已写入的索引不会跟着撤销）。
+     * ES 不可用时返回空列并告警，由调用方跳过本轮反向对账，不影响正向对账与业务。</p>
+     *
+     * @param limit 单次扫描上限（避免一次拉全索引把内存打满）
+     */
+    public List<String> findAllIds(int limit) {
+        try {
+            Query query = Query.findAll().setPageable(PageRequest.of(0, Math.max(1, limit)));
+            return es.search(query, EsProduct.class).stream()
+                    .map(SearchHit::getId)
+                    .toList();
+        } catch (Exception e) {
+            log.warn("读取 ES 文档列表失败（本轮反向对账跳过）：{}", e.getMessage());
+            return List.of();
         }
     }
 

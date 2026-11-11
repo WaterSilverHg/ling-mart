@@ -14,6 +14,7 @@ USE `lingmart_order`;
 -- 订单主表
 -- order_status：0待支付 1已支付 2已发货 3已完成 4已取消 5已退款
 -- refund_status：0无退款 1退款中（买家申请待审核） 2已退款 3退款拒绝
+-- delivery_mode：1快递 2无需物流（自提/面交）；0/NULL 表示尚未发货
 -- -------------------------------------------------------------
 DROP TABLE IF EXISTS `order`;
 CREATE TABLE `order`
@@ -29,9 +30,21 @@ CREATE TABLE `order`
     `refund_reason` VARCHAR(255)   DEFAULT NULL COMMENT '退款申请原因（买家填写）',
     `refund_reject_reason` VARCHAR(255) DEFAULT NULL COMMENT '退款拒绝原因（卖家填写，仅拒绝时有值）',
     `refund_time`   DATETIME       DEFAULT NULL COMMENT '退款处理时间（通过/拒绝）',
+    -- 与 refund_time 区分：这里记「买家提交申请的时刻」，是超时自动同意的计时锚点。
+    -- 存量订单该列为 NULL，故**不会被自动同意**（安全默认，避免升级后历史申请被批量退掉）
+    `refund_apply_time` DATETIME   DEFAULT NULL COMMENT '退款申请时间（买家提交；超时自动同意的锚点）',
     `buyer_remark`  VARCHAR(255)   DEFAULT NULL COMMENT '买家备注',
     `pay_time`      DATETIME       DEFAULT NULL COMMENT '支付时间',
     `ship_time`     DATETIME       DEFAULT NULL COMMENT '发货时间',
+    `delivery_mode` TINYINT        DEFAULT NULL COMMENT '发货方式：1快递 2无需物流',
+    `shipping_company` VARCHAR(50) DEFAULT NULL COMMENT '快递公司（仅 delivery_mode=1 时有值）',
+    `tracking_no`   VARCHAR(64)    DEFAULT NULL COMMENT '运单号（仅 delivery_mode=1 时有值）',
+    -- 收货信息是**下单时快照**，不是外键引用：买家事后改地址簿或删地址，已生成的订单不受影响
+    `address_id`    BIGINT         DEFAULT NULL COMMENT '下单时选用的地址簿ID（仅留痕，不参与查询）',
+    `receiver_name` VARCHAR(50)    DEFAULT NULL COMMENT '收货人姓名（下单快照）',
+    `receiver_phone` VARCHAR(20)   DEFAULT NULL COMMENT '收货人手机号（下单快照）',
+    `receiver_region` VARCHAR(120) DEFAULT NULL COMMENT '省市区（下单快照，如 浙江省 杭州市 西湖区）',
+    `receiver_detail` VARCHAR(255) DEFAULT NULL COMMENT '详细地址（下单快照）',
     `complete_time` DATETIME       DEFAULT NULL COMMENT '完成时间',
     `cancel_time`   DATETIME       DEFAULT NULL COMMENT '取消时间',
     `idempotency_key` VARCHAR(64)  DEFAULT NULL COMMENT '幂等键（客户端 Idempotency-Key 头，防重复下单）',
@@ -46,7 +59,9 @@ CREATE TABLE `order`
     KEY `idx_shop_id` (`shop_id`),
     KEY `idx_order_status` (`order_status`),
     -- 超时扫描按 (order_status, create_time) 过滤，复合索引避免全表扫描
-    KEY `idx_status_create` (`order_status`, `create_time`)
+    KEY `idx_status_create` (`order_status`, `create_time`),
+    -- 退款超时自动同意的扫描条件：refund_status=1 AND refund_apply_time < ?,同样用复合索引
+    KEY `idx_refund_apply` (`refund_status`, `refund_apply_time`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COMMENT = '订单主表';
@@ -107,6 +122,32 @@ CREATE TABLE `cart`
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COMMENT = '购物车表';
+
+-- -------------------------------------------------------------
+-- 收货地址簿
+-- -------------------------------------------------------------
+DROP TABLE IF EXISTS `user_address`;
+CREATE TABLE `user_address`
+(
+    `id`             BIGINT       NOT NULL COMMENT '主键',
+    `user_id`        BIGINT       NOT NULL COMMENT '归属用户ID',
+    `receiver_name`  VARCHAR(50)  NOT NULL COMMENT '收货人姓名',
+    `receiver_phone` VARCHAR(20)  NOT NULL COMMENT '收货人手机号',
+    `province`       VARCHAR(50)  NOT NULL COMMENT '省',
+    `city`           VARCHAR(50)  NOT NULL COMMENT '市',
+    `district`       VARCHAR(50)  NOT NULL COMMENT '区/县',
+    `detail_address` VARCHAR(255) NOT NULL COMMENT '详细地址（街道门牌）',
+    `is_default`     TINYINT      NOT NULL DEFAULT 0 COMMENT '是否默认地址：1是 0否',
+    `create_time`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    KEY `idx_user` (`user_id`)
+    -- 这里刻意**不加** (user_id, is_default) 唯一键：is_default 大量为 0，
+    -- 联合唯一会让「同一个非默认地址」互相冲突（第二条普通地址就插不进去）。
+    -- MySQL 无部分索引，默认地址的唯一性由应用层在同一事务内「先清零再置一」保证。
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4
+  COMMENT = '收货地址簿';
 
 -- -------------------------------------------------------------
 -- Seata AT 模式 undo_log 表（全局事务回滚用，勿删）

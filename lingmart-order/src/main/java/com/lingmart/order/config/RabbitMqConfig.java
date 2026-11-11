@@ -1,6 +1,7 @@
 package com.lingmart.order.config;
 
 import org.springframework.amqp.core.*;
+import com.lingmart.order.mq.ReturnedMessageTracker;
 import org.springframework.amqp.rabbit.config.RetryInterceptorBuilder;
 import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
@@ -135,9 +136,13 @@ public class RabbitMqConfig {
     }
 
     @Bean
-    public RabbitTemplate rabbitTemplate(ConnectionFactory connectionFactory, MessageConverter messageConverter) {
+    public RabbitTemplate rabbitTemplate(ConnectionFactory connectionFactory, MessageConverter messageConverter,
+                                         ReturnedMessageTracker returnedMessageTracker) {
         RabbitTemplate template = new RabbitTemplate(connectionFactory);
         template.setMessageConverter(messageConverter);
+        // mandatory：消息无法路由时让 broker 回传（否则会被静默丢弃，Outbox 却以为发成功了）
+        template.setMandatory(true);
+        template.setReturnsCallback(returnedMessageTracker::onReturned);
         return template;
     }
 

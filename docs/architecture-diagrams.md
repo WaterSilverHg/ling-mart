@@ -51,12 +51,14 @@ flowchart TB
 
     subgraph MW["中间件"]
         NACOS["Nacos :8848<br/>注册/发现 + 共享配置<br/>+ Sentinel 规则"]
-        MYSQL["MySQL :3307<br/>6 套独立业务库"]
+        MYSQL["MySQL :3307<br/>7 套独立库<br/>（6 业务 + agent 审计）"]
         REDIS["Redis :6380<br/>黑名单/限流/缓存/会话"]
         ES["Elasticsearch :9201<br/>索引 lingmart_product"]
         MQ["RabbitMQ :5672<br/>支付事件/超时延迟"]
         SEATA["Seata TC :8091<br/>分布式事务协调"]
         CHROMA["ChromaDB :18000<br/>知识库向量库"]
+        PROM["Prometheus :9090<br/>抓取 9 个服务指标"]
+        GRAF["Grafana :3000<br/>平台总览看板"]
     end
 
     FE -->|"HTTP /api/**"| GW
@@ -157,7 +159,7 @@ flowchart LR
         SHOP -->|"getUser 昵称头像"| AUTH
         SHOP -->|"updateRole 提升卖家"| AUTH
         PRODUCT -->|"getShopByUserId / getShopById / getShopsByIds 批量"| SHOP
-        PRODUCT -->|"syncStock / listStock（POST /internal/ware/stock/batch）"| WARE
+        PRODUCT -->|"syncStock（POST /internal/ware/sku/sync）/ listStock（POST /internal/ware/stock/batch）"| WARE
         CHAT -->|"getShopsByIds"| SHOP
         CHAT -->|"listUsers"| AUTH
         CART["order 的购物车"] -->|"getSkuInfo 加购校验"| PRODUCT
@@ -235,9 +237,9 @@ flowchart TB
     A -->|"审核入驻 / 商品 / 店铺改名"| A
 
     subgraph PERM["关键权限边界"]
-        P1["白名单路径：免登录<br/>/api/auth/register|login|code/send<br/>/api/shop/storefront/**、/api/shop/list<br/>/api/search/**、/uploads/**、/ws/**<br/>/actuator/health、/v3/api-docs/**、/swagger-ui/**、/webjars/**"]
+        P1["白名单路径：免登录<br/>/api/auth/register|login|code/send<br/>/api/shop/storefront/**、/api/shop/list<br/>/api/search/**、/uploads/**、/ws/**<br/>各服务 /api/{svc}/v3/api-docs（逐条列出）<br/>/actuator/health、/v3/api-docs/**、/swagger-ui/**、/webjars/**"]
         P2["需登录：其余 /api/**<br/>含 /api/auth/logout、/api/auth/user/**"]
-        P3["/api/admin/**：需 ROLE_ADMIN<br/>（网关 403 + 控制器 AuthUtils 二次校验）"]
+        P3["/api/admin/**：需 ROLE_ADMIN<br/>（网关 403 + 控制器 AuthUtils 二次校验）<br/>Agent 管理端在 /api/agent/admin/**，同级拦截"]
         P4["/internal/**：不经过网关<br/>仅服务间 Feign 可达"]
         P5["数据隔离：卖家只能操作<br/>自己 shopId 下的商品/订单"]
     end
@@ -353,13 +355,14 @@ sequenceDiagram
 
     rect rgb(235, 245, 255)
     Note over B,W: 阶段一：下单（Seata 全局事务 createOrder）
-    B->>GW: POST /api/order（Idempotency-Key）
+    B->>GW: POST /api/order（Idempotency-Key，可选 addressId）
     GW->>O: 转发（X-User-Id）
     O->>O: 幂等预查 (idempotencyKey, buyerId)
+    O->>DB: 解析收货地址（指定 → 默认 → 最近新增；无则拒单）
     O->>P: Feign getSkuInfo 逐条取服务端快照
     P-->>O: SKU 价格/标题（非上架或非通过则拒买）
     O->>O: 校验单店铺订单 + 禁自买
-    O->>DB: 插 order（待支付）+ order_item
+    O->>DB: 插 order（待支付 + receiver_* 收货快照）+ order_item
     O->>W: Feign lockStock（CAS: stock-locked_stock>=num）
     W->>DB: ware_sku.locked_stock += num<br/>+ ware_order_task(0 已锁定)
     W-->>O: 全部成功（任一不足则抛异常 → 全局回滚）
@@ -396,7 +399,7 @@ sequenceDiagram
     O->>W: Feign restockStock（ware 是 Seata AT 分支，可随全局事务回滚）
     O->>P: Feign POST /internal/product/sale/rollback（GREATEST(...,0) 保非负 + sale_rollback_log 按 order_sn 幂等）
     P->>P: 发 SaleUpdateEvent → 异步刷新 ES 销量
-    Note over O,P: product 未引 Seata 客户端、其写入不是 AT 分支，故必须排在 restockStock <b>之后</b><br/>（顺序反了会留下「库存已回补而销量未回退、且无法回滚」的窗口）
+    Note over O,P: product 自 v0.26 起已接入 Seata、是 AT 分支参与者，与 ware 同处一个全局事务<br/>（此前它<b>不是</b>分支，才需要靠"排在 restockStock 之后"来兜——现在任一步失败都由 undo_log 整体回滚）
     end
 ```
 
@@ -410,7 +413,7 @@ stateDiagram-v2
     待支付 --> 已支付: 买家支付（pay）
     待支付 --> 已取消: 买家取消 / 超时自动关单<br/>（解锁库存）
     已支付 --> 已发货: 卖家发货（ship）
-    已发货 --> 已完成: 买家确认收货（confirm）
+    已发货 --> 已完成: 买家确认收货（confirm）<br/>或发货 N 天后自动确认（OrderAutoConfirmJob）
     已支付 --> 已退款: 退款审核通过（回补库存）
     已发货 --> 已退款: 退款审核通过（回补库存）
     已完成 --> 已退款: 退款审核通过（回补库存）
@@ -590,7 +593,7 @@ sequenceDiagram
     participant LLM as DeepSeek（OpenAI 协议）
 
     U->>FE: 输入问题 / 操作诉求
-    FE->>AG: POST /api/agent/chat（SSE，带 X-User-Id 与页面上下文）
+    FE->>AG: POST /api/agent/chat（SSE，带 Authorization: Bearer 与页面上下文）
     AG->>AG: 限流（每分钟）+ 并发信号量 + 长度校验
     AG->>KB: RAG 检索知识库（topK，失败降级为空）
     AG->>AG: 组 System 消息（行为规则 + 历史裁剪）+ Redis 记忆
@@ -612,7 +615,7 @@ sequenceDiagram
 
 ## 16. 数据库 ER 关系
 
-> 六套独立库（auth / shop / product / order / ware / chat），**无跨库外键**，跨库一致性由 Feign + Seata 或 MQ 保证。
+> 七套独立库（auth / shop / product / order / ware / chat / agent），**无跨库外键**，跨库一致性由 Feign + Seata 或 MQ 保证。
 > 主键均为雪花 ID（`ASSIGN_ID`）；仅 Outbox 与流水等内部日志表保留自增。
 
 ```mermaid
@@ -775,7 +778,7 @@ erDiagram
 | `/api/ware/**` | lingmart-ware | 需登录 |
 | `/api/search/**` | lingmart-search | 免登录 |
 | `/api/chat/**`、`/ws/**` | lingmart-chat | REST 需登录；WS 由 STOMP CONNECT 校验 |
-| `/api/agent/**` | lingmart-agent | 需登录（X-User-Id 缺失时降级匿名会话） |
+| `/api/agent/**` | lingmart-agent | 需登录（**Agent 自行验签 JWT**，不依赖 X-User-Id，无匿名会话）；其中 `/api/agent/admin/**` 另需 ROLE_ADMIN |
 | `/api/admin/**` | auth / shop / product | 需 ROLE_ADMIN |
 | `/uploads/**` | lingmart-shop（静态资源） | 免登录 |
 | `/internal/**` | 各服务 | 不经网关，仅服务间 Feign |

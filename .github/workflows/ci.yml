@@ -1,0 +1,122 @@
+# =============================================================
+# 轻营 · 持续集成（v0.39 新增）
+#
+# 目标：把「本地能过」变成「提交前必须能过」。三条独立流水线：
+#   1. backend   —— mvn verify（编译 + 全部单元测试 + 打包）
+#   2. frontend  —— vitest 单测 + vite build
+#   3. security  —— 依赖漏洞扫描（手动/每周触发，见下方 schedule）
+#
+# 说明：
+#   · **不启动任何中间件**。现有测试全部是纯单测或内存实现（无 @SpringBootTest、
+#     无 Testcontainers），因此 CI 里不需要 MySQL/Redis/Nacos。若将来引入需要真实
+#     中间件的集成测试，请用 Testcontainers 而不是在 CI 里起 compose。
+#   · 集成测试 AuthApiIT 不匹配 surefire 的默认命名规则（*Test/Test*/*Tests），
+#     不会在 verify 阶段运行；需要跑请单独用 -Dit.test 走 failsafe。
+#   · 覆盖率/静态检查（jacoco/checkstyle）尚未接入，见 docs/todo-and-optimization.md。
+# =============================================================
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  schedule:
+    # 每周一 03:00 UTC 跑一次完整流水线（含依赖漏洞扫描），
+    # 目的是发现「代码没动但依赖被披露新漏洞」的情况——这是推送触发做不到的。
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+# 同一分支的新提交会取消上一次未完成的构建，避免排队浪费
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 后端 · 编译与单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # 为什么拆成两步而不是一条 `mvn verify`：
+      # order 的测试依赖 ware 模块（test scope，直接复用真实的 WareServiceImpl）。
+      # 一旦反应堆走到 package，spring-boot-maven-plugin 会把 ware 的 jar 原地 repackage
+      # 成 fat jar（业务类挪进 BOOT-INF/classes），此后 order 编译测试时就再也找不到那些类。
+      # 所以先用 test 阶段跑测试（此时依赖解析到 target/classes，正常），
+      # 再用 maven.test.skip 单独验证打包。彻底修法见 docs/todo-and-optimization.md。
+      - name: 编译与单元测试
+        run: mvn -B -ntp test
+
+      - name: 验证打包
+        run: mvn -B -ntp -Dmaven.test.skip=true package
+
+      # 测试失败时也要能看到失败用例的堆栈
+      - name: 上传测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: '**/target/surefire-reports/**'
+          if-no-files-found: ignore
+          retention-days: 7
+
+  frontend:
+    name: 前端 · 单测与构建
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lingmart-frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: lingmart-frontend/package-lock.json
+
+      # npm ci 依据 package-lock.json 精确安装，可复现；npm install 会改 lock 文件
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 单元测试（vitest）
+        run: npm test
+
+      - name: 生产构建
+        run: npm run build
+
+  security:
+    name: 安全 · 依赖漏洞扫描
+    runs-on: ubuntu-latest
+    # 只在定时任务与手动触发时跑：NVD 数据同步很慢，每次推送都跑会把 CI 拖成几十分钟
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # CVSS≥7 直接失败；误报登记在 dependency-check-suppressions.xml
+      - name: OWASP Dependency-Check
+        run: mvn -B -ntp -Psecurity-scan verify -DskipTests -Dnvd.api.key=${{ secrets.NVD_API_KEY }}
+
+      - name: 上传扫描报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: '**/target/dependency-check-report.*'
+          if-no-files-found: ignore
+          retention-days: 30

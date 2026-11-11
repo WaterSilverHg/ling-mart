@@ -40,3 +40,9 @@ management:
       exposure:
         # prometheus：/actuator/prometheus 指标抓取端点（需 micrometer-registry-prometheus）
         include: health,info,prometheus
+  metrics:
+    distribution:
+      # 让 http.server.requests 产出 _bucket（直方图），Prometheus 才能用
+      # histogram_quantile 算 p95/p99；不开的话只有 count/sum/max，Grafana 画不出分位线。
+      percentiles-histogram:
+        http.server.requests: true

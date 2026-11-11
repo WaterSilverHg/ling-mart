@@ -42,7 +42,7 @@ public class AgentAuditAdminController {
      * @param userId    可选，按用户过滤
      * @param sessionId 可选，按会话过滤
      * @param eventType 可选，按事件类型过滤（tool_proposed / user_confirmed / user_cancelled /
-     *                  receipt_rejected / turn_completed / tool_run）
+     *                  receipt_rejected / turn_completed / tool_run / preroute_blocked / context_reset）
      * @param from      可选，起始时间（ISO，如 2026-09-21T00:00:00）
      * @param to        可选，结束时间（ISO）
      * @param page      页码（从 1 起）

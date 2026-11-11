@@ -1,6 +1,6 @@
 # 轻营 · 生产级差距分析
 
-> 评估起点：2026-08-19（v0.2）· 最近复核：**2026-09-20（v0.11）**
+> 评估起点：2026-08-19（v0.2）· 最近复核：**2026-10-14（v0.31）**
 > 结论先行：**当前是「可演示的 MVP + 较完整的一致性工程」，距「生产可用」主要差在
 > 真实支付/纠纷仲裁、安全加固（TLS、`/internal` 隔离）、备份与 CI/CD**——可靠性、可观测两块已在 v0.3~v0.11 补齐。
 >
@@ -18,7 +18,7 @@
 | 开店申请 → 审核 → 上架 | ✅ | 三态申请规则（审核中/营业中禁再申请、被拒可复用重来） |
 | 商品发布/审核/上下架 | ✅ | 宽松重审（旧内容先卖、新内容通过后生效） |
 | 检索（ES + IK 分词） | ✅ | 空索引已改为返回空结果 |
-| 购物车/下单/支付/发货/确认 | ⚠️ | **支付为模拟**（`POST /pay` 直接改状态），无真实支付网关 |
+| 购物车/下单/支付/发货/确认 | ⚠️ | **支付为模拟**（`POST /pay` 直接改状态），无真实支付网关。收货地址（v0.39）与发货超时自动确认（v0.39）已补齐 |
 | 聊天（买家 ↔ 老板） | ✅ | WebSocket(STOMP) 实时 + 历史持久化；会话内互看头像/昵称/手机号 |
 | 店铺主页 | ✅ | 公开浏览 + 店主公开信息 + 在售商品 |
 | 订单导出 / 卖家数据统计 | ✅ | EasyExcel + ECharts 看板 |
@@ -35,14 +35,15 @@
 
 | 项目 | 现状 | 差距 |
 | --- | --- | --- |
-| 分布式事务 | Seata AT 覆盖「开店申请 / 下单→锁库存 / 支付扣减 / 取消解锁 / 退款回补」 | auth 角色提升**未纳入全局事务**（独立提交），由 `RolePromotionRetryScheduler` 定时补偿（v0.6）✅ 已解决 |
+| 分布式事务 | Seata AT 覆盖「开店申请/审核 / 下单→锁库存 / 支付扣减 / 取消解锁 / 退款回补」 | auth 角色提升**未纳入全局事务**（独立提交），由 `RolePromotionRetryScheduler` 定时补偿（v0.6）✅ 已解决。⚠️ 另一处曾在 v0.11 被误判为「已覆盖」：跨服务 XID 从未传递，导致 ware/product 实际都不是分支——**v0.26 已修复**（自建 Feign 拦截器 + product 接入 seata + 网关剥离伪造头），但**尚未做过故障注入实测**，见下 |
 | 幂等 | 下单 `Idempotency-Key` + 定时扫描兜底超时取消 | 其余写接口（审核/开店重提交）依赖业务规则校验，无接口级幂等键 |
 | ES 一致性 | 上架写/下架删/审核刷新；`EsProductService` 写失败落 `es_write_retry` 补偿表，定时按指数退避重放 | ✅ 补偿（v0.4）+ **对账任务**（v0.6，`reconcileEsIndex` 周期补缺失索引）均已落地 |
+| **ES 与全局事务** | ES **不是** Seata 事务参与者；AT 的一阶段先把本地分支提交、全局回滚在其后，故「本地事务内 / 本地提交后」触发的 ES 写入**不会随全局回滚撤销** | ⚠️ v0.26 接通 XID 传播后才出现：`approveInternal` 的 `index` 可能留下「DB 中不存在」的幽灵文档；`SalesEsRefreshListener` 的销量刷新可能超前。现有两只补偿机制**都只做「DB 有、ES 无」方向**，无反向清理 —— 见 [todo-and-optimization.md](todo-and-optimization.md) 第六节 #16 |
 | 消息可靠性 | RabbitMQ TTL+死信超时取消 | ✅ v0.6：消费失败退避重试 3 次，耗尽由 `RepublishMessageRecoverer` 重发死信队列 `order.timeout.dlq`（告警监听器）；**不依赖队列级死信参数，旧队列无需删除可热升级**；兜底扫描仍兜底 |
 | 缓存 | 商品详情 `@Cacheable` | ✅ v0.6：`sync=true` 防热点击穿 + 空值缓存（商品不存在短暂缓存）防穿透；仍无 Redis 集群 |
 | 优雅停机 | `server.shutdown: graceful` | ✅ 已有 |
-| 并发写 | 下单经 Seata 锁库存 | 高并发下全局锁热点（同 SKU 串行化）属预期，但未压测过阈值 |
-| Seata 分支事务边界 | ✅ v0.11：ware 的 `lockStock`/`unlockStock`/`restockStock`/`syncStock` 补 `@Transactional`（AT 要求分支落在单一本地事务内） | 需实测「第二件 SKU 不足 → 第一件锁定被回滚」验证 |
+| 并发写 | 下单经 Seata 锁库存（**v0.26 起才真正生效**：此前 XID 没传到 ware，全局锁从未建立） | 高并发下全局锁热点（同 SKU 串行化）属预期，但未压测过阈值 |
+| Seata 分支事务边界 | ⚠️ v0.11：ware 的 `lockStock`/`unlockStock`/`restockStock`/`syncStock` 补了 `@Transactional`（AT 要求分支落在单一本地事务内）——但当时**分支根本没注册**（XID 没传过去），该补丁是无用功。v0.26 接通传播后此约束才真正生效 | 需实测两点：① 被调方日志出现 `org.apache.seata.rm.datasource`（证明分支已注册）；② 故障注入下 `locked_stock` 与 `ware_order_task` 被 undo_log 回滚干净 |
 | 并发唯一性 | ✅ v0.11：`shop.uk_user_id`、`cart.uk_buyer_sku` 唯一键 + 应用层捕冲突（此前可落下两行店铺，导致该用户永久无法开店） | 存量库需跑三段式迁移清理重复数据 |
 | 状态流转并发 | ✅ v0.11：`pay` 改为带条件原子更新（重复支付被拒绝，销量不会重复累加）；补偿流水卡 `status=2` 有回收+告警 | — |
 
@@ -63,7 +64,7 @@
 | 验证码 | 登录失败/发码限流已 **Redis 分布式化**（ZSET 滑动窗口，5 次/5 分钟等） | 无（已解决多实例共享） |
 | 注入 | MyBatis-Plus 参数化 SQL | ✅ 已改：销量累加 `setSql("sale_count = sale_count + {0}", num)` 参数绑定（v0.4），消除拼接 |
 | 敏感信息 | 生产日志打印 SQL（StdOutImpl） | 生产需关闭 SQL 日志、脱敏手机号 |
-| 依赖漏洞 | 未跑过依赖扫描 | 建议接入 OWASP Dependency-Check / Dependabot |
+| 依赖漏洞 | ✅ 已提供 `mvn -Psecurity-scan verify -DskipTests`（OWASP Dependency-Check，CVSS≥7 失败） | 尚未接入 CI 定时任务 |
 
 **生产必须**（P0）：换 JWT 密钥、启用 HTTPS、关闭 Swagger/SQL 日志、/internal 网络隔离。
 
@@ -76,9 +77,9 @@
 | 健康检查 | `/actuator/health` 每服务暴露，网关白名单 | ✅ |
 | 日志 | 统一 slf4j + 中文业务日志 + 统一 logback-spring.xml（含 traceId/spanId，Micrometer Tracing） | 无日志采集（EFK/Loki） |
 | 链路追踪 | ✅ Micrometer Tracing（Brave）+ 日志 MDC traceId/spanId；Zipkin 容器随 compose 默认启动、上报默认开启 | 无采样率分级（默认 1.0 全采样，量大时需调低 `TRACING_SAMPLING_PROBABILITY`） |
-| 指标/监控 | ✅ `/actuator/prometheus` 已暴露（v0.4） | 指标就绪；**告警**（QPS/延迟/错误率，Alertmanager）仍待配 |
+| 指标/监控 | ✅ 完整闭环（v0.37）：`/actuator/prometheus` → compose 内置 Prometheus 抓取 → Grafana 预置总览看板（在线率/请求速率/P95/5xx/堆内存/连接池/Agent Token） | 指标与看板就绪；**告警**（Alertmanager）仍待配 |
 | CI/CD | ❌ | 无流水线（k6 回归脚本已备好，接入 CI 即可） |
-| 部署 | ✅ Docker Compose 一键起中间件 + 业务镜像（`docker/business.Dockerfile` 9 服务共用）；✅ Nacos 配置中心动态下发（mybatis/management，改后热更新） | 无 K8s/编排、无蓝绿/滚动发布 |
+| 部署 | ✅ Docker Compose 一键起中间件 + 业务镜像（`docker/business.Dockerfile` 9 服务共用）；✅ Nacos 配置中心动态下发；✅ `docker-compose.prod.yml`：业务端口不外发布（`/internal` 网络隔离落地）+ 可选 nginx TLS | 无 K8s、无蓝绿/滚动发布 |
 | 数据备份 | ❌ | MySQL/ES 无备份与恢复演练 |
 | 限流规则 | ✅ Sentinel 规则接 Nacos 数据源（网关与 product/order/search），改配置即时生效 | 无 Sentinel Dashboard 可视化面板 |
 
@@ -107,8 +108,8 @@
 | P0 | 售后/退款/纠纷流程 | 1~2 周 | ✅ 退款状态机已落地（v0.5，模拟退款+库存回补）；剩余：真实退款渠道、纠纷仲裁 |
 | P0 | 安全加固（JWT 换钥 + HTTPS + 关 Swagger/SQL 日志 + /internal 隔离） | 0.5 周 | 部署时改环境变量 + 网关前置 TLS + 生产关闭开关 |
 | P0 | MySQL/ES 备份策略 | 0.5 周 | 定时 dump + 恢复演练 |
-| P1 | 链路追踪 + 指标 + 告警 | 1 周 | ✅ 追踪（v0.11 起 zipkin 与上报默认开启）+ 指标（v0.4）已落地；仅剩告警（Alertmanager） |
-| P1 | ES 写失败补偿 + 对账 | 1 周 | ✅ 补偿已落地（v0.4，`es_write_retry` + 定时重放）；仅剩字段级对账任务可选 |
+| P1 | 链路追踪 + 指标 + 告警 | 1 周 | ✅ 追踪（v0.11 起 zipkin 默认开启；v0.37 补 Feign 出站埋点）+ 指标（v0.37 Prometheus/Grafana 全链路）已落地；仅剩告警（Alertmanager） |
+| P1 | ES 写失败补偿 + 对账 | 1 周 | ✅ 补偿（`es_write_retry` + 定时重放）+ **双向对账**（v0.37 补反向清理幽灵文档） |
 | P1 | CI/CD 流水线（含 k6 回归） | 1 周 | GitHub Actions：build → test → k6 → 部署（待做） |
 | P1 | Sentinel 规则接 Nacos 动态下发 | 0.5 周 | ✅ 已落地（v0.3，网关与 product/order/search 均接 NacosDataSource） |
 | P2 | Redis 集群 / ES 副本 / MySQL 读写分离 | 1~2 周 | 按量增长后推进 |

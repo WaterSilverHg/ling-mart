@@ -27,6 +27,7 @@ import org.springframework.util.StringUtils;
 import java.time.Duration;
 import java.util.Date;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 用户服务实现。
@@ -47,6 +48,10 @@ public class UserServiceImpl implements UserService {
 
     /** 退出登录黑名单 key 前缀 */
     private static final String JWT_BLACKLIST_PREFIX = "lingmart:jwt:blacklist:";
+
+    /** 允许写入的角色集合（角色值参与鉴权字符串比对，必须是封闭枚举） */
+    private static final Set<String> ASSIGNABLE_ROLES = Set.of(
+            AuthConstants.ROLE_USER, AuthConstants.ROLE_SELLER, AuthConstants.ROLE_ADMIN);
 
     /** JWT 签名密钥（与网关保持一致） */
     @Value("${lingmart.jwt.secret}")
@@ -122,6 +127,13 @@ public class UserServiceImpl implements UserService {
     public void updateRole(Long userId, String role) {
         if (userId == null) {
             throw new BizException("用户ID不能为空");
+        }
+        // 角色必须来自已知枚举：此前是「传什么写什么」，一旦有任意写入入口
+        // （内部接口、管理端、后续新增的批量工具），就能把 role 写成任意字符串，
+        // 而下游/网关全是按字符串精确比对做鉴权的——写入脏值等于制造无法解释的权限状态
+        if (!ASSIGNABLE_ROLES.contains(role)) {
+            log.warn("拒绝非法角色更新：userId={}, role={}", userId, role);
+            throw new BizException("非法的角色值：" + role);
         }
         User user = userMapper.selectById(userId);
         if (user == null) {

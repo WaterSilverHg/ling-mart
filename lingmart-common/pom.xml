@@ -73,6 +73,22 @@
             <artifactId>spring-boot-starter-data-redis</artifactId>
             <optional>true</optional>
         </dependency>
+        <!-- Seata 跨服务 XID 传播（客户端侧）：SeataXidFeignInterceptor 读 RootContext 写请求头。
+             两个依赖都是 optional=true，不向消费方传播——只有同时具备 Feign 与 Seata 的服务
+             （order / shop）才会启用该自动配置，其余服务（auth/search/chat/agent/网关）不受影响。
+             版本：feign-core 由 spring-cloud-openfeign-dependencies 的 feign-bom 托管；
+             seata-all 用父 POM 的 seata.version（与各服务已引入的 starter 同版本）。 -->
+        <dependency>
+            <groupId>io.github.openfeign</groupId>
+            <artifactId>feign-core</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.seata</groupId>
+            <artifactId>seata-all</artifactId>
+            <version>${seata.version}</version>
+            <optional>true</optional>
+        </dependency>
         <!-- Lombok @Slf4j 生成的日志代码依赖该门面（common 不引入 starter-logging，故显式声明） -->
         <dependency>
             <groupId>org.slf4j</groupId>

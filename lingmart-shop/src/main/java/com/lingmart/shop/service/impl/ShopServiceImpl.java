@@ -207,6 +207,7 @@ public class ShopServiceImpl implements ShopService {
     }
 
     @Override
+    @GlobalTransactional(name = "reviewShopApplication", rollbackFor = Exception.class)
     @Transactional(rollbackFor = Exception.class)
     public void review(String role, Long operatorId, Long applicationId, ReviewApplicationDTO dto) {
         AuthUtils.requireRole(role, AuthConstants.ROLE_ADMIN);
@@ -218,6 +219,10 @@ public class ShopServiceImpl implements ShopService {
             throw new BizException("该申请已审核");
         }
 
+        // 本方法内会经 Feign 让 product 上架或拒绝商品，那是另一个库的写入：不开全局事务时，
+        // 若 shop 侧随后失败（如审计落库异常），会出现「商品已上架、申请仍待在审核」。
+        // product 已接入 seata starter，其 /internal/product/** 写入作为 AT 分支随本事务回滚；
+        // auth 的角色提升是唯一未纳入的旁路（见下方 try/catch，由 RolePromotionRetryScheduler 兜底）
         ShopApplication updateApp = new ShopApplication();
         updateApp.setId(app.getId());
         if (Boolean.TRUE.equals(dto.getApprove())) {

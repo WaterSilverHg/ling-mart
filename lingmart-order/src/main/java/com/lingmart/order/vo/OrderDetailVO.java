@@ -41,11 +41,38 @@ public class OrderDetailVO {
     /** 退款处理时间 */
     private LocalDateTime refundTime;
 
+    /** 退款申请时间（买家提交；卖家超时未处理将自动同意） */
+    private LocalDateTime refundApplyTime;
+
     private String buyerRemark;
 
     private LocalDateTime payTime;
 
     private LocalDateTime shipTime;
+
+    /** 发货方式：1 快递 / 2 无需物流；null = 尚未发货（含 v0.27 之前已发货的存量订单） */
+    private Integer deliveryMode;
+
+    /** 快递公司（仅 deliveryMode=1 时有值） */
+    private String shippingCompany;
+
+    /** 运单号（仅 deliveryMode=1 时有值） */
+    private String trackingNo;
+
+    /** 收货人姓名（下单快照；v0.39 之前的存量订单为空） */
+    private String receiverName;
+
+    /** 收货人手机号（下单快照） */
+    private String receiverPhone;
+
+    /** 省市区（下单快照） */
+    private String receiverRegion;
+
+    /** 详细地址（下单快照） */
+    private String receiverDetail;
+
+    /** 完整收货地址（省市区 + 详细地址，展示用；无收货信息时为 null） */
+    private String receiverFullAddress;
 
     private LocalDateTime completeTime;
 

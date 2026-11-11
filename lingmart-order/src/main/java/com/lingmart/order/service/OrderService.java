@@ -3,6 +3,7 @@ package com.lingmart.order.service;
 import com.lingmart.common.result.PageResult;
 import com.lingmart.order.dto.OrderCreateDTO;
 import com.lingmart.order.dto.OrderExportRow;
+import com.lingmart.order.dto.ShipDTO;
 import com.lingmart.order.vo.OrderDetailVO;
 import com.lingmart.order.vo.SellerStatsVO;
 
@@ -54,8 +55,9 @@ public interface OrderService {
      *
      * @param userId  卖家用户ID
      * @param orderSn 订单号
+     * @param dto     发货参数（发货方式；选快递时另含快递公司与运单号）
      */
-    void ship(Long userId, String orderSn);
+    void ship(Long userId, String orderSn, ShipDTO dto);
 
     /**
      * 买家确认收货：置已完成。
@@ -64,6 +66,21 @@ public interface OrderService {
      * @param orderSn 订单号
      */
     void confirm(Long buyerId, String orderSn);
+
+    /**
+     * 发货超时后由系统自动确认收货（无买家上下文）。
+     *
+     * <p>解决的是「买家一直不点确认收货，订单永远停在已发货」的问题：
+     * 完成时间、卖家结算、统计口径都依赖 {@code order_status=3}。
+     * 由 {@code OrderAutoConfirmJob} 定时扫描后逐笔调用，
+     * 与买家手动确认走同一套状态守卫（谁先到谁生效，另一方静默跳过）。</p>
+     *
+     * <p>⚠️ **必须经 Spring 代理调用**（从别的 Bean 注入本接口再调），
+     * 自调用会让事务注解静默失效。</p>
+     *
+     * @param orderSn 订单号
+     */
+    void confirmBySystem(String orderSn);
 
     /**
      * 买家申请退款：已支付/已发货/已完成的订单、且当前无退款记录时可申请。
@@ -83,6 +100,18 @@ public interface OrderService {
      * @param rejectReason 拒绝原因（拒绝时必填）
      */
     void reviewRefund(Long userId, String orderSn, boolean approve, String rejectReason);
+
+    /**
+     * 单笔退款的超时自动同意（v0.27）：买家申请退款后卖家超过阈值（默认 24 小时）未处理，
+     * 系统按「同意退款」处理——订单置已退款 + 库存回补 + 销量回退，与卖家手动通过走同一实现。
+     *
+     * <p>由 {@code RefundAutoApproveJob} 定时扫描后逐笔调用。
+     * ⚠️ **必须经 Spring 代理调用**（从别的 Bean 注入本接口再调），
+     * 若在 {@code OrderServiceImpl} 内部自调用，本方法上的事务注解会静默失效。</p>
+     *
+     * @param orderSn 订单号
+     */
+    void autoApproveTimeoutRefund(String orderSn);
 
     /**
      * 支付超时自动取消（RabbitMQ 消费者调用，无买家上下文）。

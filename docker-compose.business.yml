@@ -9,6 +9,16 @@
 #
 # 说明：业务容器经 compose 网络用服务名连基础设施（mysql:3306 / redis:6379 / elasticsearch:9200 等
 #       容器内端口），与宿主机 java -jar 启动互不影响；两者端口映射相同，勿同时占用。
+#
+# 端口绑定（BIND_ADDR，默认 127.0.0.1）：
+#   业务服务只对本机发布端口，不再监听 0.0.0.0。原因是这些服务里的 /internal/**（服务间接口）
+#   完全没有鉴权——AuthInternalController 的说明里那句「不对外暴露」只有在端口的网络可达性
+#   受控时才成立。默认绑定回环后：
+#     · 本机浏览器 / k6 / scripts/verify-health.sh 照常访问；
+#     · 局域网其他机器与 Docker 网关都连不上业务端口，只能走网关 :88；
+#     · 生产部署请用 docker-compose.prod.yml（这些端口直接不发布），而不是把这个变量调大。
+#   如果确实需要「容器间经宿主机端口互访」（即把 NACOS_DISCOVERY_IP 设成宿主机局域网 IP 的那种部署），
+#   必须同时设 BIND_ADDR 为同一个宿主机 IP，否则容器之间会互相调不通。
 # =============================================================
 
 x-business-env: &business-env
@@ -44,7 +54,7 @@ services:
       REDIS_PORT: "6379"
       # 验证码明文返回开关：容器编排默认关闭（此前写死 true，导致在 .env 里设 false 也关不掉明文验证码）
       DEV_CODE_ENABLED: ${DEV_CODE_ENABLED:-false}
-    ports: ["8000:8000"]
+    ports: ["${BIND_ADDR:-127.0.0.1}:8000:8000"]
     depends_on: [nacos, mysql, redis]
     restart: unless-stopped
 
@@ -59,7 +69,7 @@ services:
       DB_USERNAME: root
       DB_PASSWORD: ${DB_PASSWORD:-root}
       UPLOAD_DIR: /app/uploads
-    ports: ["8100:8100"]
+    ports: ["${BIND_ADDR:-127.0.0.1}:8100:8100"]
     volumes:
       - shop-uploads:/app/uploads
     depends_on: [nacos, mysql, seata-server]
@@ -78,8 +88,10 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       ES_URIS: http://elasticsearch:9200
-    ports: ["10001:10001"]
-    depends_on: [nacos, mysql, redis, elasticsearch]
+    ports: ["${BIND_ADDR:-127.0.0.1}:10001:10001"]
+    # seata-server 不能漏：product 自 v0.26 起是 Seata AT 分支参与者
+    # （shop 的入驻申请/审核事务经 Feign 调用本服务的 /internal/product/** 写入）
+    depends_on: [nacos, mysql, redis, elasticsearch, seata-server]
     restart: unless-stopped
 
   # ---------- 仓储服务 :11000 ----------
@@ -96,7 +108,7 @@ services:
       RABBITMQ_PORT: "5672"
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-guest}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
-    ports: ["11000:11000"]
+    ports: ["${BIND_ADDR:-127.0.0.1}:11000:11000"]
     depends_on: [nacos, mysql, rabbitmq, seata-server]
     restart: unless-stopped
 
@@ -114,7 +126,7 @@ services:
       RABBITMQ_PORT: "5672"
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-guest}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
-    ports: ["9000:9000"]
+    ports: ["${BIND_ADDR:-127.0.0.1}:9000:9000"]
     depends_on: [nacos, mysql, rabbitmq, seata-server]
     restart: unless-stopped
 
@@ -125,7 +137,7 @@ services:
     environment:
       <<: *business-env
       ES_URIS: http://elasticsearch:9200
-    ports: ["12000:12000"]
+    ports: ["${BIND_ADDR:-127.0.0.1}:12000:12000"]
     depends_on: [nacos, elasticsearch]
     restart: unless-stopped
 
@@ -139,7 +151,7 @@ services:
       DB_PORT: "3306"
       DB_USERNAME: root
       DB_PASSWORD: ${DB_PASSWORD:-root}
-    ports: ["13000:13000"]
+    ports: ["${BIND_ADDR:-127.0.0.1}:13000:13000"]
     depends_on: [nacos, mysql]
     restart: unless-stopped
 
@@ -172,7 +184,7 @@ services:
       # 只读工具调用业务 API 的入口：必须指向**网关**（案 B——Agent 只透传用户 JWT，不做权限判断）。
       # 容器内用 compose 服务名，不能沿用 yml 默认的 localhost（那是容器自身）。
       AGENT_GATEWAY_BASE_URL: http://lingmart-gateway:88
-    ports: ["14000:14000"]
+    ports: ["${BIND_ADDR:-127.0.0.1}:14000:14000"]
     depends_on: [nacos, redis, chroma, mysql]
     restart: unless-stopped
 

@@ -1,5 +1,6 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="全部服务" type="CompoundRunConfigurationType">
+    <toRun name="lingmart-agent" type="SpringBootApplicationConfigurationType" />
     <toRun name="lingmart-auth" type="SpringBootApplicationConfigurationType" />
     <toRun name="lingmart-chat" type="SpringBootApplicationConfigurationType" />
     <toRun name="lingmart-gateway" type="SpringBootApplicationConfigurationType" />

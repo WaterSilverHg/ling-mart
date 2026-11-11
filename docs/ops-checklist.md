@@ -2,7 +2,7 @@
 
 > 适用对象：本机（Windows + Docker Desktop + JDK21）从零部署、日常运维、生产加固。
 > 目标：把「服务起没起、配置对不对、库表新不新」一次说清，减少反复踩坑。
-> 快速体检：`bash scripts/verify-health.sh`（一键巡检基础设施 + 8 个核心服务；不含可选的 lingmart-agent）。
+> 快速体检：`bash scripts/verify-health.sh`（一键巡检基础设施 + 库结构 + 9 个服务，含 lingmart-agent）。
 
 ---
 
@@ -18,15 +18,18 @@
 | 9000 | lingmart-order | 订单服务 | 下单/支付/发货/退款/超时取消，依赖 RabbitMQ + Seata |
 | 12000 | lingmart-search | 检索服务 | ES 多条件检索 |
 | 13000 | lingmart-chat | 聊天服务 | WebSocket(STOMP) + 消息历史 |
-| 14000 | lingmart-agent（可选） | 网页浮窗 Agent | **不属于核心链路**：`start-services.bat`/`verify-health.sh`/「全部服务」运行配置都不含它。问答 + 页面操作引导（SSE），依赖 Redis + Chroma；LLM 默认第三方 OpenAI 兼容 API |
+| 14000 | lingmart-agent | 网页浮窗 Agent | 问答 + 页面操作引导 + 本人数据只读查询（SSE）。**v0.30 起是必要模块**：`start-services.bat`/`verify-health.sh`/`.run/全部服务` 三处都已纳入。依赖 Redis + ChromaDB + 审计库 `lingmart_agent`；LLM 默认第三方 OpenAI 兼容 API（DeepSeek） |
 | 3307 | MySQL 8 | 基础设施 | 各业务独立库（容器内 3306，宿主映射 3307） |
 | 8848 | Nacos 2.4.3 | 基础设施 | 注册中心 + 配置中心（控制台 `http://localhost:8848/nacos`） |
 | 6380 | Redis 7 | 基础设施 | 缓存/验证码/限流（容器内 6379，宿主映射 6380） |
 | 9201 | Elasticsearch 8.15.5 | 基础设施 | 商品检索（容器内 9200，宿主映射 9201） |
 | 5672 / 15672 | RabbitMQ 3.13 | 基础设施 | AMQP / 管理台（guest/guest） |
 | 8091 | Seata TC 2.5.0 | 基础设施 | 分布式事务协调器 |
-| 9411 | Zipkin 3.4 | 基础设施 | 链路追踪 UI 与上报入口（**随 `docker compose up -d` 默认启动**，各服务 `ZIPKIN_ENABLED` 默认 true；UI `http://localhost:9411`） |
+| 9411 | Zipkin 3.4 | 基础设施 | 链路追踪 UI 与上报入口（**随 `docker compose up -d` 默认启动**，各服务 `ZIPKIN_ENABLED` 默认 true；UI `http://localhost:9411`）。**数据落 Elasticsearch**（`zipkin-span-YYYY-MM-DD` 索引），容器重启不丢 |
 | 18000 | ChromaDB | 基础设施 | Agent 知识库向量库（宿主对外 18000 ↔ 容器内 8000；已避开 auth:8000 与默认 8000。`lingmart-agent` 需其可达，否则启动会因建 collection 失败） |
+| 9090 | Prometheus 2.55 | 基础设施 | 指标采集（抓取 9 个服务的 `/actuator/prometheus`），`/targets` 可看抓取状态 |
+| 3000 | Grafana 11.2 | 基础设施 | 指标看板；账号 `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD`（默认 admin/admin） |
+| 80 / 443 | nginx（可选，`--profile tls`） | 基础设施 | TLS 终止，转发到网关 88（生产加固覆盖层） |
 | 11434 | Ollama（可选） | 基础设施 | Agent 备用本地 LLM（`profiles: ["ai"]` 默认不启动） |
 
 > ⚠️ 注意：Redis 的**宿主端口是 6380**（容器内 6379，docker-compose 做了端口映射），业务服务读取 `REDIS_PORT=6380`。
@@ -54,6 +57,7 @@ cp .env.example .env       # Git Bash
 | `DEV_CODE_ENABLED` | — | 生产**必须为 `false`**（关闭验证码明文返回）。**容器编排默认已是 `false`**、本地 yml 默认 `true`。⚠️ 若你**用容器编排做联调**又没接短信通道，验证码取不到 → 此时显式设 `DEV_CODE_ENABLED=true` 才能从接口响应拿到 `devCode` |
 | `NACOS_DISCOVERY_IP` | 可选 | 服务注册到 Nacos 的 IP。本地默认 `127.0.0.1`（已写入各服务 yml 与 `docker-compose.business.yml`）；**容器编排部署必须覆盖为宿主机局域网 IP**，否则容器间 Feign 报「无实例」（与 Seata 无关，Seata 已改直连 TC） |
 | `SEATA_REGISTRY_TYPE` / `SEATA_GROUPLIST` | 可选 | Seata 客户端找 TC 的方式。默认 `file` 直连 `127.0.0.1:8091`（宿主机跑服务）；容器编排已由 compose 覆盖为 `seata-server:8091`。**通常无需改动**，详见下方「已知环境风险」第 1 条 |
+| `BIND_ADDR` | 可选 | `docker-compose.business.yml` 里 8 个业务服务的宿主机绑定地址，**默认 `127.0.0.1`**（v0.38 起）。默认值下只有本机能访问业务端口，局域网与 Docker 网关都到不了 `/internal/**`。仅当采用「服务注册宿主机 IP、容器间经宿主机端口互访」的部署方式时，才需要把它设成与 `NACOS_DISCOVERY_IP` 相同的宿主机局域网 IP，否则容器之间互相调不通 |
 | `SEATA_IP` | 可选 | 仅当 `SEATA_REGISTRY_TYPE=nacos` 时生效：TC 登记到 Nacos 的 IP，**必须填真实 IPv4**（域名无效），否则宿主机服务连不上 TC |
 
 > `.env` 已被 `.gitignore` 忽略，不会提交。`.env.example` 是模板，不要写真实密钥进模板。
@@ -65,7 +69,24 @@ cp .env.example .env       # Git Bash
 > - 排查：`.env` 是否真的被加载，看 `/actuator/env` 里有没有名为 `dotenv-file-<路径>` 的属性源。
 
 ### 3. Docker 镜像加速器绕过（仅首次/镜像缺失时）
-本机阿里云加速器已失效（403）。先执行 `scripts/pull-images.bat`，从可用源 `docker.1panel.live` 拉取并重打标准标签，之后 `docker compose up` 直接使用本地镜像、不再联网。
+本机阿里云加速器 `39h4n4b7.mirror.aliyuncs.com` 已失效——**对所有镜像（含 `library/*` 官方镜像）都返回 403**，不是个别镜像的问题。先执行 `scripts/pull-images.bat`，从可用源 `docker.1panel.live` 拉取并重打标准标签，之后 `docker compose up` 直接使用本地镜像、不再联网。
+
+- 脚本**幂等**：本地已有标准标签的镜像会跳过，可反复执行；
+- 覆盖 compose 里全部基础镜像（含 Prometheus / Grafana），**新增监控组件后忘记跑一次，`docker compose up` 就会报 `failed to resolve reference ... 403`**；
+- 输出的常见错误特征：`unexpected status from HEAD request to https://39h4n4b7.mirror.aliyuncs.com/...: 403 Forbidden`；
+- 单个镜像临时补拉（以 Prometheus 为例）：
+  ```bash
+  docker pull docker.1panel.live/prom/prometheus:v2.55.0
+  docker tag  docker.1panel.live/prom/prometheus:v2.55.0 prom/prometheus:v2.55.0
+  ```
+- 彻底解法是把可用镜像源写进 Docker Desktop 的 `daemon.json`（`registry-mirrors`）并重启 Docker，但 `docker.1panel.live` 属第三方代理，只建议在本地开发机使用。
+- 拉取偶发 `short read: expected N bytes but got M: unexpected EOF`（镜像站网络截断），**直接重跑即可**，已下载的层会复用。
+
+> ⚠️ **`.bat` 文件的编码约定**（本条是踩过的坑）：`pull-images.bat` 是**纯 ASCII** 的，这是刻意的。
+> cmd.exe 在 GBK 代码页下解析 UTF-8 中文批处理会出错——它会把部分中文行的**前半截吞掉、把后半截当命令执行**，
+> 输出一串 `'xxx' 不是内部或外部命令`（脚本本身仍能跑完、退出码为 0，所以很容易被忽略）。
+> 其余 `start-infra.bat` / `build.bat` 等仍是 UTF-8 中文注释，**跑起来会刷出同类报错，属已知现象、不影响执行**；
+> 若要去掉，改法与 `pull-images.bat` 一致（注释改 ASCII，中文说明放回本文档）。
 
 ---
 
@@ -77,7 +98,7 @@ cp .env.example .env       # Git Bash
 :: ① 拉取中间件镜像（加速器失效时）
 scripts\pull-images.bat
 
-:: ② 拉起基础设施（Nacos + MySQL + Redis + ES + RabbitMQ + Seata + Zipkin + ChromaDB）
+:: ② 拉起基础设施（Nacos + MySQL + Redis + ES + RabbitMQ + Seata + Zipkin + ChromaDB + Prometheus + Grafana）
 ::    MySQL 首次启动自动执行 sql/ 建库建表；Ollama 需 --profile ai 才启动
 scripts\start-infra.bat
 :: 等价命令：docker compose up -d
@@ -100,7 +121,7 @@ scripts\start-services.bat
 ```
 
 ```bash
-# ⑥ 一键体检：基础设施 + 8 个核心服务健康状态
+# ⑥ 一键体检：基础设施 + 库结构 + 9 个服务健康状态
 bash scripts/verify-health.sh
 ```
 
@@ -120,7 +141,7 @@ bash scripts/verify-health.sh
 - MySQL 是**旧库**（曾在早期版本初始化过）→ 需跑增量迁移脚本补列/补表。
 
 > 💡 **先跑 `bash scripts/verify-health.sh`**：v0.12 起它内置「库结构」一项，会直接列出缺失的表/唯一键
-> （`order_paid_event` / `stock_flow_log` / `es_write_retry` / `sale_rollback_log` / `shop.uk_user_id` / `cart.uk_buyer_sku`）。
+> （`order_paid_event` / `stock_flow_log` / `es_write_retry` / `sale_rollback_log` / `agent_audit_log` / `shop.uk_user_id` / `cart.uk_buyer_sku`）。
 > 典型症状：库是早期版本初始化的 → 起 order 服务后报 `Table 'lingmart_order.order_paid_event' doesn't exist`
 > （MySQL 容器的 `docker-entrypoint-initdb.d` **只在数据目录为空时执行一次**，老库不会自动补）。
 
@@ -145,10 +166,13 @@ SHOW TABLES FROM lingmart_product LIKE 'sale_rollback_log';"
 | `2026-09-06-snowflake-id.sql` | 业务表主键去掉 `AUTO_INCREMENT`（改雪花 ID） | v0.6 |
 | `2026-09-06-stock-flow-log.sql` | `stock_flow_log` 表（库存扣减流水/补偿） | v0.6 |
 | `2026-09-20-sale-rollback-log.sql` | `sale_rollback_log` 表（退款回退销量幂等） | v0.10 |
-| `2026-09-20-integrity-and-indexes.sql` | **三段式**：唯一键（`shop.uk_user_id`、`cart.uk_buyer_sku`）+ 4 条索引 + Outbox 注释。**先跑第一段自检** | v0.11 |
+| `2026-09-20-integrity-and-indexes.sql` | **三段式**：唯一键（`shop.uk_user_id`、`cart.uk_buyer_sku`）+ 5 条索引 + Outbox 注释。**先跑第一段自检** | v0.11 |
+| `2026-10-03-refund-and-shipping.sql` | `order` 表 4 列（`refund_apply_time`、`delivery_mode`、`shipping_company`、`tracking_no`）+ `idx_refund_apply` 索引 | v0.27 |
+| `2026-11-10-address-and-receiver.sql` | `user_address` 表（收货地址簿）+ `order` 表 5 列（`address_id`、`receiver_name`、`receiver_phone`、`receiver_region`、`receiver_detail`） | v0.39 |
 | `scripts/migrate-v0506.sql` | 历史脚本：退款四列 + `spu.min_price` | v0.5 |
 
-**推荐：一键按序执行全部迁移**（幂等，「已存在」类报错会被识别为跳过）
+**推荐：一键按序执行全部迁移**（覆盖 `sql/upgrade/` 下全部 8 个脚本 + `scripts/migrate-v0506.sql`；
+「已存在」与「Duplicate column」类报错会被识别为跳过，可安全重复执行）
 ```bash
 bash scripts/migrate.sh          # Git Bash（需 docker 客户端能连上守护进程，脚本会先自查）
 ```
@@ -224,9 +248,16 @@ docker exec -i lingmart-mysql mysql -uroot -proot --default-character-set=utf8mb
 ### 4.4 下单 → 支付 → 发货 → 确认 → 退款
 1. 买家加购物车 → 结算下单 → 「我的订单」支付（模拟支付）。
    **重复支付回归**：对同一订单再点一次支付 → 应报「订单状态不允许支付」，且商品销量**只加一次**。
-2. 卖家中心订单列表发货 → 买家确认收货。
+2. **卖家发货（v0.27 起必须先选发货方式）**：
+   - 选「快递发货」但不填公司/单号 → 应报「快递发货请填写快递公司 / 运单号」，发不出去；
+   - 选「快递发货」填好 → 发货成功，**买家「我的订单」里能看到「物流：xx 公司 单号」**；
+   - 换一单选「无需物流（自提 / 面交）」→ 直接可提交，买家侧显示「无需物流（自提 / 面交）」。
+   - 然后买家确认收货。
 3. 买家申请退款 → 卖家审核通过 → 订单置「已退款」、库存回补、**销量回退（SPU/SKU 一并减回，ES `saleCount` 秒级刷新）**、不计入销售统计；对同一订单再点一次「通过」应报「该订单没有待审核的退款申请」且销量不再变化。
-4. 超时未支付订单自动取消：**超时时长默认 2 分钟**（`lingmart.order.timeout-ms: 120000`，演示用，可按需调大）——RabbitMQ 延迟队列 TTL 到期触发 + 每 60s 兜底扫描双保险，`order.timeout.dlq` 有告警日志。
+4. **退款超时自动同意（v0.27）**：把 `lingmart.order.refund-auto-approve-ms` 临时设为 `60000`（1 分钟）后重启 order，
+   买家申请退款后**什么都不做** → 等一轮扫描（默认 60s）→ 订单应自动变「已退款」，且库存回补、销量回退。
+   ⚠️ **24 小时没法等，必须把阈值调小**才能验证这条链路。验完记得改回 `86400000`。
+5. 超时未支付订单自动取消：**超时时长默认 2 分钟**（`lingmart.order.timeout-ms: 120000`，演示用，可按需调大）——RabbitMQ 延迟队列 TTL 到期触发 + 每 60s 兜底扫描双保险，`order.timeout.dlq` 有告警日志。
 
 ### 4.5 聊天
 1. 买家在店铺主页「联系老板」→ 会话建立，历史消息持久化。
@@ -235,7 +266,11 @@ docker exec -i lingmart-mysql mysql -uroot -proot --default-character-set=utf8mb
 4. **发送失败回执**：把 `CHAT_SEND_MAX_PER_30S` 调小（如 2）后重启 chat，连续发送 → 超出部分显示「发送失败」气泡 + 重发按钮，连接**不再断开**；点「重发」可成功。
 5. 深链 `/chat?cid=<真实会话 id>` 能直接打开会话。
 
-### 4.6 网页浮窗 Agent（Copilot，可选组件）
+### 4.6 网页浮窗 Agent（Copilot）
+> **v0.30 起它是必要模块**：已纳入 `.run/全部服务`、`scripts\start-services.bat`、`scripts/verify-health.sh`。
+> 这让"一键启动"变得**要求三条前置齐备**（见下），缺 Chroma 会直接起不来——
+> 排查顺序就是下面第 1 条。若只是临时想跑核心链路，用 IDEA 单独启动其余 8 个，不要用「全部服务」。
+
 1. **前置（顺序很重要）**：
    - `docker compose up -d`（含 Chroma），并**确认 Chroma 已就绪**：`bash scripts/verify-health.sh` 里 `ChromaDB` 一项为 ✓，
      或直接 `curl -sf http://localhost:18000/api/v2/heartbeat`。
@@ -248,9 +283,88 @@ docker exec -i lingmart-mysql mysql -uroot -proot --default-character-set=utf8mb
      所以新环境第一次提问就能基于知识库回答；也可手工 `POST /api/agent/admin/kb/rebuild`。
 2. 管理员重建知识库：`curl -X POST http://localhost:88/api/agent/admin/kb/rebuild -H "Authorization: Bearer <admin token>"`；
    查看状态用 **GET** `GET /api/agent/admin/kb/status`（确认 `ready=true`；知识种子见 `lingmart-agent/src/main/resources/kb/`，向量集合名 `lingmart_kb`）。
+   重建后可跑一次**召回评估**建立基线：`curl -s http://localhost:88/api/agent/admin/kb/eval -H "Authorization: Bearer <admin token>"`
+   ——看 `recall`（recall@3）、`emptyCount` 与 `misses`。只走检索层、不调用模型，可随时重跑。
+   **以上操作（状态 / 重建 / 评估 / 审计查询）在管理后台「运维台」（`/admin/ops`）都有界面入口。**
 3. 前端打开任意非登录页 → 右下角 🤖 浮窗 → 输入“什么是幂等键？”应得到基于知识库的回答。
 4. 输入“我想申请开店”→ 出现「跳转页面 /shop/apply」确认卡片 → 点【确认】→ 自动跳转申请开店页。
 5. 全程设计说明见 [docs/agent-copilot.md](agent-copilot.md)。若暂不想起 Chroma，纯问答调试可设 `AI_VECTORSTORE_TYPE=none` + `AGENT_KB_ENABLED=false`。
+
+### 4.7 验证 Seata 分支真的注册了（v0.26 起，改事务相关代码后必做）
+
+> **为什么单列一节**：这个项目的 Seata 曾长期是**装饰**——TC、`@GlobalTransactional`、四个库的 `undo_log`
+> 全都就位，唯独跨服务 XID 从没传过去，ware / product 根本没有注册成分支（来龙去脉见
+> [evolution.md](evolution.md) 第四节 1.1）。所以事务相关的改动**不能只看接口通不通**，
+> 必须确认分支真的注册了。曾有一处 `@Transactional` 补丁（v0.11）是在分支根本没注册的前提下做的，
+> 属于无用功——这类「以为在保护、其实没有」正是本清单要防的。
+
+1. 给 order / ware / product 开 Seata DEBUG 日志。项目根 `.env` 追加两行：
+   ```
+   logging.level.org.apache.seata=DEBUG
+   logging.level.io.seata=DEBUG
+   ```
+   ⚠️ **必须写带点的规范形式**：`.env` 被 common 的 `DotenvEnvironmentPostProcessor` 加载为**普通
+   MapPropertySource**（不做环境变量的松散绑定），写 `LOGGING_LEVEL_ORG_APACHE_SEATA` 配不上。
+2. 清空旧日志（现有文件动辄 6 万行，混着看会瞎）：`mkdir -p logs/old && mv logs/*.log logs/old/`
+3. 重启服务，跑两个场景：**下单**（order→ware）、**提交开店申请 + 管理员审核通过**（shop→product→ware）。
+4. 取证：
+   ```bash
+   for s in order ware shop product; do
+     printf "%-8s rm.datasource = %s\n" "$s" "$(grep -c 'org\.apache\.seata\.rm\.datasource' logs/lingmart-$s.log)"
+   done
+   ```
+5. 判读：
+
+   | order | ware | shop | product | 结论 |
+   | --- | --- | --- | --- | --- |
+   | >0 | >0 | >0 | >0 | ✅ 分支已在被调方注册，传播生效 |
+   | >0 | **0** | — | **0** | ❌ 只有发起方自己注册了 → 跨服务 XID 又断了（查 common 的 `SeataXidPropagationAutoConfiguration` 是否加载、网关是否误剥离） |
+   | **0** | — | — | — | ⚠️ 连发起方都没注册 → TC 没起，或 `@GlobalTransactional` 没生效 |
+
+   ⚠️ **别被干扰项骗了**：`org.apache.seata.integration.http.TransactionPropagationInterceptor` 的日志
+   （形如 `xid in RootContext[null] xid in HttpContext[null]`）**对所有请求都会打印**，
+   与是否成为分支**无关**。**判据只看 `rm.datasource`**。
+6. 更进一步（**唯一**能证明「回滚真的发生了」的方式）——**故障注入**：先记下某 SKU 的
+   `ware_sku.locked_stock` 与 `ware_order_task` 行数，然后在 `OrderServiceImpl.createOrder` 的
+   `lockStock` 之后临时抛异常，下一单并让它失败，复查两者是否回到原值：
+   - 修复前：锁定残留（这就是那个 bug）
+   - 修复后：被 undo_log 回滚干净
+
+   **验证完务必删掉临时代码。**
+7. 验完删掉 `.env` 里那两行日志级别，否则日志会一直很大。
+
+> 相关边界：ES **不是** Seata 事务参与者，全局回滚不会撤销已写入的 ES 文档——
+> 见 [todo-and-optimization.md](todo-and-optimization.md) 第六节 #16 与第七节 #11。
+
+### 4.8 安全加固冒烟（v0.38，改鉴权/分页/校验相关代码后必做）
+
+| # | 验证项 | 操作 | 预期 |
+| --- | --- | --- | --- |
+| 1 | 身份头不可伪造 | 带合法 token 调 `GET /api/order/list`，额外加请求头 `X-User-Id: 1` | 返回的是**当前 token 用户**的订单，不是用户 1 的 |
+| 2 | 白名单路径不转发身份头 | 调 `GET /api/shop/storefront/1` 时带 `X-User-Id: 1` | 请求正常返回；下游日志里的 userId 为空（该路径本就不读身份） |
+| 3 | 内部接口不能提权 | `POST http://localhost:8000/internal/user/role`，body `{"userId":<任意>,"role":"ROLE_ADMIN"}` | 返回 403「内部接口不允许提权为管理员」，数据库中该用户角色不变 |
+| 4 | 非法角色被拒 | `POST /api/admin/auth/{userId}/role`（管理员 token），body `{"role":"ROOT"}` | 返回业务失败「非法的角色值：ROOT」 |
+| 5 | 分页封顶 | `GET /api/order/list?page=1&size=999999` | 实际返回条数 ≤ 100（响应里的 `size` 也被收敛为 100） |
+| 6 | 下单入参上限 | 构造 51 条 `items` 的下单请求 | 400「单次下单最多 50 个商品」 |
+| 7 | 默认凭据守卫 | 带 `-f docker-compose.prod.yml` 且故意不设 `JWT_SECRET` 启动 auth | 容器启动失败，日志列出全部违规项（JWT 密钥 / 数据库口令 …） |
+
+> 第 3 项在默认的 `docker-compose.business.yml` 下需要直连 `localhost:8000`——
+> v0.38 起该端口只绑 `127.0.0.1`，本机可直连，局域网机器不能。
+
+### 4.9 收货地址与自动确认收货（v0.39，改订单/地址相关代码后必做）
+
+前置：已执行 `sql/upgrade/2026-11-10-address-and-receiver.sql`（或重置过库）。
+
+| # | 验证项 | 操作 | 预期 |
+| --- | --- | --- | --- |
+| 1 | 地址 CRUD | 登录后访问 `/addresses` 页面新增一条地址 | 列表出现该地址并标记「默认」 |
+| 2 | 首个地址自动默认 | 新用户只加一条地址 | `is_default=1`（不必手动勾「默认地址」） |
+| 3 | 默认地址唯一 | 再加一条地址并点「设为默认」 | 原默认地址变回普通，列表只有一条绿色「默认」 |
+| 4 | 越权保护 | 用 A 账号的 token 调 `PUT /api/order/addresses/{B的地址id}` | 返回「收货地址不存在」，B 的地址不变 |
+| 5 | 下单快照 | 结算页选地址下单 → 回到地址簿**修改/删除**该地址 → 打开订单 | 订单里的收货信息仍是下单时的内容（快照未受影响） |
+| 6 | 无地址拒绝下单 | 新注册账号（无地址）直接 `POST /api/order` 且不带 `addressId` | 返回「请先添加收货地址」，不生成订单 |
+| 7 | 自动确认收货 | `auto-confirm-days: 0` + 重启 order，造一笔已发货订单，等下一轮扫描（默认 1 小时，可把 `AUTO_CONFIRM_SCAN_MS=60000` 调小） | 订单状态 2 → 3，`complete_time` 被写入，日志出现「发货超时，系统自动确认收货」 |
+| 8 | 退款中不自动完成 | 已发货订单申请退款（`refund_status=1`）后触发扫描 | 订单状态保持 2，日志显示「退款流程进行中，跳过自动确认收货」 |
 
 ---
 
@@ -262,7 +376,8 @@ docker exec -i lingmart-mysql mysql -uroot -proot --default-character-set=utf8mb
 | 停止全部业务服务 | `scripts\stop-services.bat` |
 | 看服务日志 | 本地启动：`./logs/{服务名}.log`（logback 文件 appender，含 traceId/spanId）；容器：`docker logs -f lingmart-xxx` |
 | 看中间件日志 | `docker logs -f lingmart-mysql` / `lingmart-nacos` / `lingmart-rabbitmq` / `lingmart-elasticsearch` |
-| 巡检 | `bash scripts/verify-health.sh`（8 个核心服务；agent 为可选项不纳入） |
+| 巡检 | `bash scripts/verify-health.sh`（9 个服务，含 agent；另含 ChromaDB、Prometheus targets、Grafana 与 `lingmart_agent` 审计库） |
+| 看监控 | Grafana `http://localhost:3000`（预置「平台总览」看板）；抓取状态 `http://localhost:9090/targets` |
 | **重置环境（危险！）** | `scripts\reset-data.bat` / `scripts\reset-data.sh`：**删除 MySQL 全部业务库 / Redis / Nacos 配置 / Seata 会话 / ES 数据 / 上传图片**，重建后再按「二、首次部署」步骤走。仅当数据脏到无法排障时使用。 |
 | 数据备份（建议定期） | MySQL：`docker exec lingmart-mysql mysqldump -uroot -proot --all-databases > backup.sql`；ES：快照或 `curl -X GET 'localhost:9201/_cat/indices?v'` 确认索引存在（业务数据以 MySQL 为准，ES 可重建） |
 
@@ -287,19 +402,26 @@ docker exec -i lingmart-mysql mysql -uroot -proot --default-character-set=utf8mb
 
 | # | 事项 | 现状 | 处置 |
 | --- | --- | --- | --- |
-| 1 | JWT 密钥 | 容器编排已强制 `.env` 提供（未设拒绝启动）；本地 yml 仍有内置开发值 | `.env` 设 `JWT_SECRET`（`openssl rand -hex 32`）；本地若未设，启动日志会出现「检测到 JWT 签名密钥仍为仓库内置的默认开发值…」的 ERROR 告警 |
-| 2 | 验证码明文 | 容器编排默认 `false`；本地 yml 默认 `true` | 生产（含容器）确认 `DEV_CODE_ENABLED=false` |
-| 3 | Nacos 密码 | 默认 `nacos/nacos` | 改服务端密码 + 各服务 `spring.cloud.nacos.*` 账号（`lingmart-common.yaml` 不含凭据） |
-| 4 | HTTPS | 未启用 | 网关前置 Nginx / 云 LB 终结 TLS |
+| 1 | JWT 密钥 | 容器编排已强制 `.env` 提供（未设拒绝启动）；本地 yml 仍有内置开发值；**v0.38 起生产覆盖层还会在启动期校验**（默认值或 <32 字节即拒绝启动） | `.env` 设 `JWT_SECRET`（`openssl rand -hex 32`）；本地若未设，启动日志会出现「检测到 JWT 签名密钥仍为仓库内置的默认开发值…」的 ERROR 告警 |
+| 2 | 验证码明文 | 容器编排默认 `false`；本地 yml 默认 `true`；**v0.38 起生产覆盖层把 `true` 视为违规** | 生产（含容器）确认 `DEV_CODE_ENABLED=false` |
+| 3 | Nacos 密码 | 默认 `nacos/nacos`；**v0.38 起生产覆盖层启动期校验** | 改服务端密码 + 各服务 `spring.cloud.nacos.*` 账号（`lingmart-common.yaml` 不含凭据） |
+| 4 | HTTPS | 已提供模板：`docker-compose.prod.yml` 的 `tls` profile + `docker/nginx/lingmart.conf`（80/443）；本地可 `scripts/gen-self-signed-cert.sh` 生成自签证书 | 生产换正式证书，或直接用云 LB 终止 TLS（此时不需要 nginx 容器） |
 | 5 | SQL 日志 | 共享配置 `lingmart-common.yaml` 里 `log-impl: StdOutImpl` | 生产覆盖为空关闭 SQL 日志；日志脱敏手机号 |
-| 6 | `/internal` 接口 | 仅靠「网关不路由 `/api/**` 之外路径 + 内网」的约定，**无共享密钥鉴权** | 对 `/internal/**` 做网络隔离（仅内网可达），或加服务间签名（见待办） |
+| 6 | `/internal` 接口 | 网关不路由 `/internal/**`；`docker-compose.prod.yml` 已**取消 8 个业务服务的宿主机端口发布**（v0.38 起 `docker-compose.business.yml` 默认也只绑 `127.0.0.1`），外部只能经网关 88 访问。**v0.38 起内部接口本身也不再允许提权为管理员**，角色写入做枚举校验。仍无服务间签名 | 生产务必带 `-f docker-compose.prod.yml` 启动；如需更强隔离再加 mTLS/签名 |
 | 7 | 数据备份 | 无 | MySQL 定时 dump + 恢复演练；ES 索引可重建 |
 | 8 | 上传目录 | 本地磁盘 + shop-uploads 卷 | 挂独立数据卷，配置防盗链；图片内容安全检测可选 |
-| 9 | 告警 | 仅 `/actuator/prometheus` 暴露 | 接 Prometheus + Alertmanager（QPS/延迟/错误率） |
+| 9 | 告警 | ✅ 指标已由 compose 内置的 Prometheus 采集、Grafana 看板可见；**Alertmanager 告警规则仍未配** | 接 Alertmanager（QPS/延迟/错误率/队列积压） |
 | 10 | 链路追踪 | ✅ 已启用：compose 内置 zipkin 随 `docker compose up -d` 启动，`ZIPKIN_ENABLED` 默认 true | UI `http://localhost:9411`；不想上报设 `ZIPKIN_ENABLED=false` 并推送共享配置 |
-| 11 | 依赖漏洞 | 未扫描 | 接入 OWASP Dependency-Check / Dependabot |
+| 11 | 依赖漏洞 | ✅ 已提供 `mvn -Psecurity-scan verify -DskipTests`（OWASP Dependency-Check，CVSS≥7 构建失败，误报登记在 `dependency-check-suppressions.xml`）；尚未接入 CI | 建议把该命令放进 CI 定时任务；有 NVD API Key 时设 `NVD_API_KEY` 提速 |
 | 12 | RabbitMQ 账号 | `guest/guest`（容器默认，`docker-compose.business.yml` 可用 `RABBITMQ_USERNAME/PASSWORD` 覆盖） | 生产换强口令并同步业务服务配置 |
-| 13 | 定时任务多实例 | 5 个 `@Scheduled` 无分布式锁（当前单实例部署） | 水平扩容前加任务租约/分布式锁（见待办） |
+| 13 | 定时任务多实例 | 8 个 `@Scheduled` 无分布式锁（当前单实例部署）。订单超时扫描已独立为 `OrderTimeoutScanJob`，与其它任务一样仍是"裸定时" | 水平扩容前加任务租约/分布式锁（见待办） |
+
+> **默认凭据守卫（v0.38）**：`docker-compose.prod.yml` 为 9 个服务设置了
+> `LINGMART_SECURITY_STRICT_CREDENTIALS=true`，启动时会一次性检查
+> JWT 密钥 / 数据库口令 / Nacos 口令 / RabbitMQ 口令 / 预置管理员口令 / 验证码明文开关，
+> 命中任一默认值即**拒绝启动**并打印完整违规清单。
+> 本地 `java -jar` 与不带生产覆盖层的 compose **不受影响**（默认关闭）。
+> 若要在本地也开启：`export LINGMART_SECURITY_STRICT_CREDENTIALS=true`。
 
 ---
 
@@ -321,6 +443,15 @@ docker exec -i lingmart-mysql mysql -uroot -proot --default-character-set=utf8mb
 | `ERROR 1064 ... near '?????,'` | PowerShell 的 `Get-Content \| docker exec` 把 UTF-8 中文转成了乱码 | 改用 `cmd /c "docker exec ... < 文件"`、`scripts/migrate.bat`，或 `docker cp` 进容器执行 |
 | `.bat` 满屏「不是内部或外部命令」+ 乱码 | `.bat` 里含中文（cmd 按 GBK 解析 UTF-8 文件） | 用纯 ASCII 的 `scripts/migrate.bat`；自己写脚本时不要放中文 |
 | `verify-health.sh` 里 MySQL/Redis/Seata 报错，但服务其实是好的 | Git Bash 的 PATH 里 `docker` 是 WindowsApps 占位程序（静默退出）/ 连不上守护进程 | 脚本会打印解析到的 docker 路径并尝试自动修正；仍不行就用 cmd/PowerShell 跑 docker 相关脚本 |
+| **Grafana 里某个服务没有曲线 / Prometheus 的 target 是 down** | 该服务未启动，或 `/actuator/prometheus` 未暴露。典型错误 `expected equal, got ":" ("INVALID") while parsing: "{\"code\":"` —— 说明抓回来的不是指标而是项目的统一 JSON 错误体（`/actuator/prometheus` 根本没有，被全局异常处理器包成了 500） | 打开 `http://localhost:9090/targets` 看具体错误；确认已跑 `scripts/push-nacos-config.sh`。判据：`/actuator` 的 `_links` 里只有 `health` = 共享配置没生效 |
+| **共享配置一直没生效**（日志有 `[Nacos Config] config[...] is empty`，`/actuator` 只有 health） | ① nacos-client 与 Nacos 服务端**跨大版本**——SCA 2025.0.0.0 默认带 client 3.0.3，本项目服务端是 2.4.3，跨版本时 gRPC 配置查询被当成「配置不存在」，返回 null 且**不报错**；`optional:` 前缀又把它吞掉。② 共享配置**晚于服务启动**推送（端点暴露只在启动时求值） | ① 父 POM 已把 `nacos-client` 固定为 **2.5.1**（与服务端 2.4.x 对齐），升级服务端到 3.x 前不要移除；② 推完配置**重启服务**。成功标志：启动日志出现 `[Nacos Config] Load config[...] success` |
+| **Nacos 控制台里配置的中文注释全是乱码** | 旧版 `push-nacos-config.sh` 用 `content="$(cat 文件)"` 传值，Windows Git Bash 会把参数从 UTF-8 转成 GBK 再交给 curl，Nacos 按 UTF-8 解码 → 存成 U+FFFD 替换字符（只影响注释，YAML 仍可解析，所以不影响启动） | 已改为 `--data-urlencode "content@文件名"`（从文件读字节）；重跑 `scripts/push-nacos-config.sh` 即可，校验方式：把 Nacos 里的内容取回来与仓库文件比 md5 |
+| **Grafana 登录** | 默认 `admin` / `admin`（`.env` 未设 `GRAFANA_ADMIN_*` 时 compose 取 `:-admin` 兜底） | `http://localhost:3000`。改口令：`.env` 设 `GRAFANA_ADMIN_USER/PASSWORD` 后 `docker compose up -d grafana`——Grafana 启动时按环境变量同步 admin 口令 |
+| **Prometheus 抓不到容器里的业务服务** | 抓取配置默认用 `host.docker.internal`（对应宿主机上的 `java -jar` 服务） | 若业务服务也跑在 `docker-compose.business.yml` 里，把 `docker/prometheus/prometheus.yml` 的 targets 改成容器服务名（如 `lingmart-order:9000`）后重启 Prometheus |
+| **Zipkin 里只能看到网关和单个服务，看不到服务间调用** | 缺 `feign-micrometer`：Feign 出站不建 client span、也不传播 trace 头，被调服务收到的是一个全新 trace | 确认 chat / order / product / shop / ware 五个用 Feign 的模块 pom 里有 `io.github.openfeign:feign-micrometer`；`mvn -pl lingmart-order dependency:tree \| grep feign-micrometer` 应能看到 13.6.1 |
+| **压测时的 trace 一条都看不到 / 只剩某个定时任务的调用边** | ① Zipkin 已改为 **ES 存储**（v0.37.3 起），容器重启不再清数据；② `/actuator/**` 自 v0.37.4 起已**排除出观测**，但各类 `@Scheduled` 仍各生成一条 trace，业务流量一停列表里就只剩这些 | ① 按 `serviceName` + `spanName` 过滤（如 `lingmart-order` + `http post /api/order`），别只看默认首屏；② 判断是否真没采到：`curl 'localhost:9411/api/v2/dependencies?endTs=<now>&lookback=7200000'` 看依赖边；③ 数据确认写进去了吗：`curl 'http://localhost:9201/_cat/indices/zipkin*?v'`，`docs.count` 应持续增长；④ 压测时建议 `TRACING_SAMPLING_PROBABILITY=0.1` 降噪 |
+| **Zipkin 里某个服务只有 `/actuator/prometheus`，没有业务 span** | 该服务这段时间没有业务流量（抓取与健康检查的 span 已在 v0.37.4 被排除，这条只可能来自旧版本服务进程） | 先确认进程是不是旧包：`/actuator` 的 `_links` 应含 `prometheus`；发一个业务请求再看。若确实要恢复 Actuator 的链路，设 `lingmart.tracing.exclude-actuator=false` |
+| **Zipkin 的 `zipkin-span-*` 索引越来越多** | Zipkin 按天建索引，默认不自动删除 | 手动清理：`curl -XDELETE 'http://localhost:9201/zipkin-span-2026-10-01'`（注意 ES 默认禁止通配符删除，要写全名）；长期可加 ILM 策略 |
 | `mvn test` **运行期**报 `java.lang.Error: Unresolved compilation problem: The constructor XxxServiceImpl(...) is undefined` | 被测类用 Lombok `@RequiredArgsConstructor`（构造参数 = 字段声明顺序），新增依赖字段后测试类没同步。注意：报在**运行期**而不是构建期，是因为 `target/test-classes` 里躺着 IDE(ecj) 编译出的「运行期必抛错的桩类」，Maven 认为 `all classes are up to date` 就跳过了重编译 | 补 `@Mock` 与构造参数（**顺序与字段声明一致**），然后 `mvn clean test`（不清 `target` 可能又跳过重编译）。另注意它会让 reactor 跳过后续模块——看着像"只有 X 模块有问题"，实际后面全没跑 |
 | `mvn test` 输出中文乱码（如 `鏍￠獙搴楅摵...`） | 控制台代码页 936(GBK)，而 JVM 日志按 UTF-8 输出 | 跑之前先 `chcp 65001`（cmd/PowerShell 同一窗口生效）；IDEA 用默认 UTF-8 控制台即可。**不要**指望在 POM 里加编码参数修——那只影响 fork 出的测试 JVM，javac 的提示跟随控制台代码页 |
 | `Mockito is currently self-attaching ...` 警告 | JDK 21+ 下 Mockito 5.x 自附加 agent | v0.13 起父 POM 已用 `-javaagent` 加载 mockito-core 消除；若仍出现，检查 `mockito.version` 是否与 `spring-boot-dependencies` 管理的一致（jar 路径由它拼接） |

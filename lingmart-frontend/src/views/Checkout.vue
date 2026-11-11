@@ -1,6 +1,24 @@
 <template>
   <div class="card">
     <h3 class="page-title">确认订单</h3>
+
+    <!-- 收货地址：下单必须选择，订单会把它快照下来（事后改地址簿不影响已生成的订单） -->
+    <div class="addr" v-if="items.length">
+      <span class="addr-label">收货地址</span>
+      <template v-if="addresses.length">
+        <el-select v-model="selectedAddressId" placeholder="请选择收货地址" style="width: 460px">
+          <el-option v-for="a in addresses" :key="a.id"
+                     :label="`${a.receiverName} ${a.receiverPhone} ${a.fullAddress}`"
+                     :value="a.id" />
+        </el-select>
+        <el-button link type="primary" @click="$router.push('/addresses')">管理地址</el-button>
+      </template>
+      <template v-else>
+        <span class="addr-empty">还没有收货地址，</span>
+        <el-button link type="primary" @click="$router.push('/addresses')">去添加</el-button>
+      </template>
+    </div>
+
     <el-table :data="items" v-if="items.length">
       <el-table-column label="商品" min-width="240">
         <template #default="{ row }">
@@ -37,24 +55,41 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { orderApi, productApi } from '../api'
+import { addressApi, orderApi } from '../api'
 
 const route = useRoute()
 const router = useRouter()
 const items = ref([])
 const remark = ref('')
 const submitting = ref(false)
+const addresses = ref([])
+const selectedAddressId = ref(null)
 const placeholder = 'https://via.placeholder.com/60x60/eee?text='
 // 幂等键：一次结算会话一个；提交成功后作废。超时/失败重试复用同一键 → 后端不会重复建单
 let idemKey = crypto.randomUUID()
 
 const total = computed(() => items.value.reduce((s, i) => s + i.price * i.num, 0))
 
+async function loadAddresses() {
+  addresses.value = await addressApi.list()
+  // 默认地址优先（列表已按默认在前排序，这里仍显式找一次，避免依赖后端排序细节）
+  const preferred = addresses.value.find(a => a.isDefault) || addresses.value[0]
+  selectedAddressId.value = preferred ? preferred.id : null
+}
+
 async function submit() {
   if (!items.value.length) return
+  if (!selectedAddressId.value) {
+    ElMessage.warning('请先选择收货地址')
+    return
+  }
   submitting.value = true
   try {
-    const dto = { items: items.value.map(i => ({ skuId: i.skuId, num: i.num })), buyerRemark: remark.value }
+    const dto = {
+      items: items.value.map(i => ({ skuId: i.skuId, num: i.num })),
+      buyerRemark: remark.value,
+      addressId: selectedAddressId.value
+    }
     const orderSn = await orderApi.create(dto, idemKey)
     idemKey = crypto.randomUUID() // 成功后作废旧键
     ElMessage.success('订单创建成功，进行模拟支付')
@@ -82,6 +117,7 @@ async function payConfirm(orderSn) {
 }
 
 onMounted(() => {
+  loadAddresses()
   const encoded = route.query.items
   if (!encoded) return
   const raw = JSON.parse(decodeURIComponent(encoded))
@@ -98,6 +134,9 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.addr { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.addr-label { color: #606266; font-size: 14px; }
+.addr-empty { color: #e6a23c; font-size: 14px; }
 .goods-cell { display: flex; gap: 10px; align-items: center; }
 .thumb { width: 60px; height: 60px; object-fit: cover; border-radius: 4px; background: #f0f2f5; }
 .spu { font-size: 14px; }

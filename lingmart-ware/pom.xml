@@ -44,6 +44,13 @@
             <groupId>org.springframework.cloud</groupId>
             <artifactId>spring-cloud-starter-openfeign</artifactId>
         </dependency>
+        <!-- Feign 出站观测：缺它时 Feign 调用不建 client span、也不传播 trace 头，
+             被调服务会另起一条 trace——Zipkin 里看起来就像"没有服务间调用"。
+             版本由 spring-cloud-openfeign-dependencies → feign-bom 统一管理。 -->
+        <dependency>
+            <groupId>io.github.openfeign</groupId>
+            <artifactId>feign-micrometer</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.cloud</groupId>
             <artifactId>spring-cloud-starter-loadbalancer</artifactId>

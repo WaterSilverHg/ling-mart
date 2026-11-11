@@ -12,7 +12,9 @@
 #      重新编码，UTF-8 的中文注释变成乱码 → mysql 报 `ERROR 1064 ... near '?????,'`。
 #      本脚本用 shell 重定向（字节直通）+ --default-character-set=utf8mb4，不受该问题影响。
 #
-# 幂等性：所有脚本都是 IF NOT EXISTS / MODIFY 形式，重复执行只会有「已存在」类报错，可忽略。
+# 幂等性：多数脚本是 IF NOT EXISTS / MODIFY 形式，重复执行只会有「已存在」类报错，可忽略。
+#   例外：`2026-09-03-stock-unlimited.sql` 与 `2026-10-03-refund-and-shipping.sql` 使用 ADD COLUMN，
+#   重复执行会报 Duplicate column——同样属预期，本脚本按「对象已存在」跳过，不计失败。
 # ============================================================
 set -u
 
@@ -29,6 +31,8 @@ SCRIPTS=(
     "sql/upgrade/2026-09-06-snowflake-id.sql"
     "sql/upgrade/2026-09-06-stock-flow-log.sql"
     "sql/upgrade/2026-09-20-sale-rollback-log.sql"
+    "sql/upgrade/2026-10-03-refund-and-shipping.sql"
+    # 三段式必须放最后：第二段可能因重复数据失败，需人工处理后再单独执行
     "sql/upgrade/2026-09-20-integrity-and-indexes.sql"
 )
 

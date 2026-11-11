@@ -45,6 +45,10 @@ call :run "sql\upgrade\2026-09-06-order-paid-outbox.sql"
 call :run "sql\upgrade\2026-09-06-snowflake-id.sql"
 call :run "sql\upgrade\2026-09-06-stock-flow-log.sql"
 call :run "sql\upgrade\2026-09-20-sale-rollback-log.sql"
+REM 2026-10-03 is NOT idempotent (plain ADD COLUMN): a rerun reports
+REM "Duplicate column", which :run treats as already-applied and skips.
+call :run "sql\upgrade\2026-10-03-refund-and-shipping.sql"
+REM three-stage script, must stay LAST (part 2 may fail on duplicate rows).
 call :run "sql\upgrade\2026-09-20-integrity-and-indexes.sql"
 
 echo.

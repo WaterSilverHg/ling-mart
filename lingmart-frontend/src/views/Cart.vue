@@ -8,7 +8,7 @@
       <el-table :data="list">
         <el-table-column label="商品" min-width="260">
           <template #default="{ row }">
-            <div class="goods-cell">
+            <div class="goods-cell" title="点击查看商品详情" @click="goProduct(row)">
               <img v-img-fallback :src="row.skuImage || placeholder" class="thumb" />
               <div>
                 <div class="spu">{{ row.spuTitle }}</div>
@@ -72,6 +72,14 @@ async function remove(row) {
   load()
 }
 
+/** 点击商品跳详情页。详情页路由参数是 spuId（见 router 的 /product/:id） */
+function goProduct(row) {
+  if (!row.spuId) {
+    return
+  }
+  router.push(`/product/${row.spuId}`)
+}
+
 function checkout() {
   // 携带购物车快照（含价格），结算页才能正确显示金额；实际下单金额仍以后端服务端快照为准
   const items = list.value.map(i => ({
@@ -94,9 +102,10 @@ onMounted(load)
 </script>
 
 <style scoped>
-.goods-cell { display: flex; gap: 10px; align-items: center; }
+.goods-cell { display: flex; gap: 10px; align-items: center; cursor: pointer; }
+.goods-cell:hover .spu { color: #409eff; }
 .thumb { width: 60px; height: 60px; object-fit: cover; border-radius: 4px; background: #f0f2f5; }
-.spu { font-size: 14px; }
+.spu { font-size: 14px; transition: color .2s; }
 .sku { color: #909399; font-size: 12px; }
 .price { color: #f56c6c; font-weight: 600; }
 .footer { display: flex; justify-content: flex-end; align-items: center; gap: 24px; margin-top: 16px; }

@@ -2,6 +2,7 @@
 REM ============================================================
 REM 轻营 · 拉起基础设施（docker compose up -d 会启动全部基础设施容器）
 REM   实际包含：Nacos + MySQL + Redis + Elasticsearch + RabbitMQ + Seata + Zipkin + ChromaDB
+REM             + Prometheus + Grafana（监控；服务起来后才有数据）
 REM             （Ollama 需 --profile ai 显式启用；只在跑 AI 组件时才需要）
 REM 依赖：docker compose（Docker Desktop）；镜像请先执行 pull-images.bat
 REM 前置：项目根目录需存在 .env（含 NACOS_AUTH_TOKEN 与 JWT_SECRET，模板见 .env.example）
@@ -22,4 +23,6 @@ echo   RabbitMQ 管理台  : http://localhost:15672  （guest / guest）
 echo   Seata TC         : localhost:8091
 echo   Zipkin UI        : http://localhost:9411
 echo   ChromaDB         : http://localhost:18000  （仅 AI 组件使用）
+echo   Prometheus       : http://localhost:9090   （抓取 9 个服务的 /actuator/prometheus）
+echo   Grafana          : http://localhost:3000   （默认 admin/admin，见 GRAFANA_ADMIN_PASSWORD）
 echo 提示：MySQL 首次启动会自动执行 sql\ 目录下的建库建表脚本。

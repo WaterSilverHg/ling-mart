@@ -6,6 +6,7 @@
         <nav class="nav">
           <router-link to="/admin/review">审核中心</router-link>
           <router-link to="/admin/logs">审计日志</router-link>
+          <router-link to="/admin/ops">运维台</router-link>
         </nav>
         <div class="user">
           <span class="nick">{{ authStore.user?.nickname || authStore.user?.phone }}</span>

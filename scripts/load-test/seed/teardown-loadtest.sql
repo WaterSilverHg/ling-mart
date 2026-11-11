@@ -48,6 +48,8 @@ DELETE FROM `lingmart_product`.`sku`        WHERE `id` BETWEEN 9500001 AND 95015
 DELETE FROM `lingmart_product`.`spu`        WHERE `id` BETWEEN 9400001 AND 9400500;
 DELETE FROM `lingmart_ware`.`ware_sku`      WHERE `id` BETWEEN 9700001 AND 9701500;
 DELETE FROM `lingmart_shop`.`shop`          WHERE `id` BETWEEN 9300001 AND 9300020;
+-- 压测买家的收货地址（v0.39 起播种）
+DELETE FROM `lingmart_order`.`user_address` WHERE `id` BETWEEN 9900001 AND 9900020;
 
 -- 账号（买家 + 卖家；管理员 13800000000 不在区间内，不受影响）
 DELETE FROM `lingmart_auth`.`user` WHERE `id` BETWEEN 9100001 AND 9100020;
@@ -62,4 +64,5 @@ UNION ALL SELECT 'shops',      COUNT(*) FROM `lingmart_shop`.`shop`          WHE
 UNION ALL SELECT 'spu',        COUNT(*) FROM `lingmart_product`.`spu`        WHERE `id` BETWEEN 9400001 AND 9400500
 UNION ALL SELECT 'sku',        COUNT(*) FROM `lingmart_product`.`sku`        WHERE `id` BETWEEN 9500001 AND 9501500
 UNION ALL SELECT 'sku_images', COUNT(*) FROM `lingmart_product`.`sku_images` WHERE `id` BETWEEN 9600001 AND 9603000
-UNION ALL SELECT 'ware_sku',   COUNT(*) FROM `lingmart_ware`.`ware_sku`      WHERE `id` BETWEEN 9700001 AND 9701500;
+UNION ALL SELECT 'ware_sku',   COUNT(*) FROM `lingmart_ware`.`ware_sku`      WHERE `id` BETWEEN 9700001 AND 9701500
+UNION ALL SELECT 'address',    COUNT(*) FROM `lingmart_order`.`user_address` WHERE `id` BETWEEN 9900001 AND 9900020;

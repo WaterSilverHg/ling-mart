@@ -1,0 +1,166 @@
+[
+  {
+    "question": "平台有哪几种角色？",
+    "expect": ["01-platform-guide.md", "10-account-and-login.md"]
+  },
+  {
+    "question": "管理后台的入口在哪里？",
+    "expect": ["01-platform-guide.md", "10-account-and-login.md"]
+  },
+  {
+    "question": "怎么申请开店？",
+    "expect": ["02-shop-guide.md"]
+  },
+  {
+    "question": "开店需要准备哪些材料？",
+    "expect": ["02-shop-guide.md"]
+  },
+  {
+    "question": "一个账号能开几家店铺？",
+    "expect": ["02-shop-guide.md", "12-platform-limits.md"]
+  },
+  {
+    "question": "改了店铺名称之后要重新审核吗？",
+    "expect": ["02-shop-guide.md"]
+  },
+  {
+    "question": "开店要收钱吗？",
+    "expect": ["02-shop-guide.md"]
+  },
+  {
+    "question": "订单都有哪些状态？",
+    "expect": ["03-product-order-guide.md"]
+  },
+  {
+    "question": "下单后多长时间内必须付款？",
+    "expect": ["03-product-order-guide.md", "08-cart-and-checkout.md", "13-troubleshooting.md"]
+  },
+  {
+    "question": "平台收运费吗？",
+    "expect": ["03-product-order-guide.md", "08-cart-and-checkout.md", "12-platform-limits.md"]
+  },
+  {
+    "question": "能买我自己店铺里的商品吗？",
+    "expect": ["03-product-order-guide.md", "08-cart-and-checkout.md"]
+  },
+  {
+    "question": "消息发不出去怎么办？",
+    "expect": ["04-chat-faq.md", "13-troubleshooting.md"]
+  },
+  {
+    "question": "聊天有发送频率限制吗？",
+    "expect": ["04-chat-faq.md", "13-troubleshooting.md"]
+  },
+  {
+    "question": "什么是幂等键？",
+    "expect": ["04-chat-faq.md", "08-cart-and-checkout.md"]
+  },
+  {
+    "question": "SKU 是什么意思？",
+    "expect": ["04-chat-faq.md", "06-seller-product-publish.md"]
+  },
+  {
+    "question": "怎么申请退款？",
+    "expect": ["05-refund-guide.md"]
+  },
+  {
+    "question": "退款被卖家拒绝了还能再申请吗？",
+    "expect": ["05-refund-guide.md"]
+  },
+  {
+    "question": "哪些订单不能申请退款？",
+    "expect": ["05-refund-guide.md"]
+  },
+  {
+    "question": "能只退其中一件商品吗？",
+    "expect": ["05-refund-guide.md", "12-platform-limits.md"]
+  },
+  {
+    "question": "商品发布之后多久能卖？",
+    "expect": ["06-seller-product-publish.md"]
+  },
+  {
+    "question": "商品审核通过会自动上架吗？",
+    "expect": ["06-seller-product-publish.md"]
+  },
+  {
+    "question": "商品可以设置不限量库存吗？",
+    "expect": ["06-seller-product-publish.md"]
+  },
+  {
+    "question": "怎么把商品下架？",
+    "expect": ["06-seller-product-publish.md"]
+  },
+  {
+    "question": "首页为什么只显示店铺不显示商品？",
+    "expect": ["07-search-and-browse.md"]
+  },
+  {
+    "question": "能按分类筛选商品吗？",
+    "expect": ["07-search-and-browse.md", "12-platform-limits.md"]
+  },
+  {
+    "question": "商品搜不到是什么原因？",
+    "expect": ["07-search-and-browse.md", "13-troubleshooting.md"]
+  },
+  {
+    "question": "加购物车有什么限制？",
+    "expect": ["08-cart-and-checkout.md"]
+  },
+  {
+    "question": "为什么连点两次提交不会下两单？",
+    "expect": ["08-cart-and-checkout.md", "04-chat-faq.md"]
+  },
+  {
+    "question": "结算需要填收货地址吗？",
+    "expect": ["08-cart-and-checkout.md", "03-product-order-guide.md", "12-platform-limits.md"]
+  },
+  {
+    "question": "卖家怎么发货？",
+    "expect": ["09-seller-center.md", "03-product-order-guide.md"]
+  },
+  {
+    "question": "经营数据看板能看什么？",
+    "expect": ["09-seller-center.md"]
+  },
+  {
+    "question": "订单怎么导出成 Excel？",
+    "expect": ["09-seller-center.md"]
+  },
+  {
+    "question": "登录凭证多久过期？",
+    "expect": ["10-account-and-login.md", "13-troubleshooting.md"]
+  },
+  {
+    "question": "忘记密码怎么办？",
+    "expect": ["10-account-and-login.md", "12-platform-limits.md"]
+  },
+  {
+    "question": "退出登录后旧 token 还能用吗？",
+    "expect": ["10-account-and-login.md"]
+  },
+  {
+    "question": "浮窗助手能做什么？",
+    "expect": ["11-copilot-help.md"]
+  },
+  {
+    "question": "助手会替我提交表单吗？",
+    "expect": ["11-copilot-help.md"]
+  },
+  {
+    "question": "平台有优惠券吗？",
+    "expect": ["12-platform-limits.md"]
+  },
+  {
+    "question": "有手机 App 吗？",
+    "expect": ["12-platform-limits.md"]
+  },
+  {
+    "question": "图片上传失败怎么办？",
+    "expect": ["13-troubleshooting.md"]
+  },
+  {
+    "question": "页面显示商品不存在但我知道它还在",
+    "expect": ["13-troubleshooting.md"]
+  }
+]

@@ -26,21 +26,32 @@ if [ -z "$TOKEN" ]; then
 fi
 
 # 2. 逐文件推送（dataId=文件名，type 按扩展名）
-# 注意：content 用 "$(cat "$f")" 传值而非 curl 的 name@file 语法——
-#      后者在 Windows Git Bash 的 curl 上不兼容（会报 content 参数缺失）
+#
+# content 必须用 curl 的 `content@文件名` 语法（从文件读字节并 URL 编码），
+# **不要**写成 content="$(cat "$f")"：
+#   Windows 的 Git Bash 会把命令行参数从 UTF-8 转换为系统代码页（GBK）再交给 curl，
+#   于是中文注释以 GBK 字节发出、而 Nacos 按 UTF-8 解码 → 存入一堆 U+FFFD 替换字符。
+#   该损坏只落在注释上、YAML 仍能解析，所以在服务端完全不报错，极难发现。
+#   已实测 `content@file` 在本机 Git Bash 下可逐字节原样存入（md5 一致）。
+#
+# 另：文件名要用**相对路径**。Windows 版 curl 打不开 MSYS 风格的绝对路径（/c/Users/...），
+#     会报 `Required request parameter 'content' ... is not present`，故先 cd 进配置目录。
 PUSHED=0
-for f in "$CONFIG_DIR"/*.yaml "$CONFIG_DIR"/*.yml "$CONFIG_DIR"/*.json; do
+cd "$CONFIG_DIR"
+for f in *.yaml *.yml *.json; do
     [ -e "$f" ] || continue
-    DATAID=$(basename "$f")
+    DATAID="$f"
     EXT="${DATAID##*.}"
-    CONTENT=$(cat "$f")
     echo "→ 推送配置：$DATAID (group=$GROUP, type=$EXT)"
-    curl -s -X POST "$NACOS_ADDR/nacos/v1/cs/configs?accessToken=$TOKEN" \
+    RESP=$(curl -s -X POST "$NACOS_ADDR/nacos/v1/cs/configs?accessToken=$TOKEN" \
         --data-urlencode "dataId=$DATAID" \
         --data-urlencode "group=$GROUP" \
         --data-urlencode "type=$EXT" \
-        --data-urlencode "content=$CONTENT"
-    echo
+        --data-urlencode "content@$f")
+    if [ "$RESP" != "true" ]; then
+        echo "✗ 推送失败：$DATAID 返回 $RESP"
+        exit 1
+    fi
     PUSHED=$((PUSHED + 1))
 done
 

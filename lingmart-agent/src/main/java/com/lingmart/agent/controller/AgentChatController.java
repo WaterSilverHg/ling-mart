@@ -127,7 +127,10 @@ public class AgentChatController {
                 return;
             }
             if (message.length() > properties.getMaxMessageLength()) {
-                sendError(emitter, "消息过长，请精简到 " + properties.getMaxMessageLength() + " 字以内");
+                // 长清单是最常见的超长来源，而它本该走文件上传（正文留在服务端，不占消息额度）——
+                // 只说"太长了"会让用户去手工删减，等于把工具用错了地方
+                sendError(emitter, "消息过长，请精简到 " + properties.getMaxMessageLength()
+                        + " 字以内；如果是商品清单这类长内容，点输入框左边的 📎 上传文件即可");
                 return;
             }
             // 限流键固定按 userId：旧版在身份缺失时回落到 sessionId 维度，而 sessionId 由前端自由提供，

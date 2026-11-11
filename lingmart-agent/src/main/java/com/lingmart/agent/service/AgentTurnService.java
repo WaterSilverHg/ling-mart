@@ -62,6 +62,12 @@ public class AgentTurnService {
     private final AgentAuditService auditService;
     private final ToolRegistry toolRegistry;
     private final ReadOnlyToolGuard readOnlyGuard;
+    /** 预填开店申请草稿的准入闸门（v0.28）：拒掉"没东西可填"的空草稿 */
+    private final PrefillGuard prefillGuard;
+    /** 会话文档（用户上传的开店材料）：正文只在用户当轮附上时注入，不落会话历史 */
+    private final AgentDocumentService documentService;
+    /** 前置路由闸门（v0.30）：受理判定 + 覆盖式话术识别，都在模型之外完成 */
+    private final PreRouteGuard preRouteGuard;
     private final RestClient gatewayClient;
     private final ExecutorService llmExecutor;
     private final MeterRegistry meterRegistry;
@@ -77,13 +83,28 @@ public class AgentTurnService {
      */
     private static final String EMPTY_USER_PLACEHOLDER = "（用户未输入文字）";
 
+    /**
+     * 前置闸门拦下元请求时的固定回复（v0.30）。
+     *
+     * <p>刻意<b>不复述命中了哪条规则</b>：那等于把规则表念给试探者听，方便他绕。
+     * 内容上如实给出可用范围，让正常用户知道下一步该问什么。</p>
+     */
+    private static final String PRE_ROUTE_BLOCK_REPLY =
+            "这个请求我处理不了～我是轻营平台的助手，只在这个范围内帮你：\n"
+                    + "- 解答平台使用问题（开店、订单、退款、商品、账号等）\n"
+                    + "- 查你自己的订单 / 店铺 / 商品\n"
+                    + "- 引导你在页面上跳转或点击\n"
+                    + "- 根据你上传的清单预填开店申请\n\n"
+                    + "换个和轻营平台相关的问法就行，我随时在。";
+
     private final TypeReference<Map<String, Object>> argsType = new TypeReference<>() {
     };
 
     public AgentTurnService(ChatClient.Builder chatClientBuilder, ObjectMapper objectMapper,
                             AgentProperties properties, ChatMemoryService memoryService,
                             KnowledgeBaseService knowledgeBaseService, AgentAuditService auditService,
-                            ToolRegistry toolRegistry, ReadOnlyToolGuard readOnlyGuard,
+                            ToolRegistry toolRegistry, ReadOnlyToolGuard readOnlyGuard, PrefillGuard prefillGuard,
+                            AgentDocumentService documentService, PreRouteGuard preRouteGuard,
                             RestClient agentGatewayRestClient, ExecutorService agentSseExecutor,
                             ObjectProvider<MeterRegistry> meterRegistryProvider) {
         this.chatClient = chatClientBuilder.build();
@@ -94,6 +115,9 @@ public class AgentTurnService {
         this.auditService = auditService;
         this.toolRegistry = toolRegistry;
         this.readOnlyGuard = readOnlyGuard;
+        this.prefillGuard = prefillGuard;
+        this.documentService = documentService;
+        this.preRouteGuard = preRouteGuard;
         this.gatewayClient = agentGatewayRestClient;
         this.llmExecutor = agentSseExecutor;
         this.meterRegistry = meterRegistryProvider.getIfAvailable();
@@ -120,20 +144,60 @@ public class AgentTurnService {
         // 审计：命中/未命中的回执都记一条（未命中的是安全信号，排障与风控都要能一眼筛出来）
         auditService.recordReceipts(userId, sessionId, consumed.matched(), consumed.unmatched());
 
-        // 2) 当前轮用户文本：输入 + 已采信的回执；未采信的另起一段说明，让模型知道它们不算数
+        AgentProperties.Constraint constraint = properties.getConstraint();
+        boolean constraintOn = constraint.isEnabled();
+
+        // 2) 前置路由闸门（v0.30）：在付出任何模型调用之前判定"这条请求要不要受理"。
+        //    只看**用户自己写的话**——页面上下文/上传文档/工具结果里的字面匹配是正常内容，
+        //    拿它们判定攻击会把普通商品标题误判成注入。
+        PreRouteGuard.Decision route = preRouteGuard.judge(request.message());
+        if (constraintOn && constraint.isPreRouteEnabled() && route.blocked()) {
+            auditService.recordPreRouteBlocked(userId, sessionId, route.ruleId(), request.message());
+            log.info("前置闸门拦下本轮（未调用模型）sessionId={} rule={}", sessionId, route.ruleId());
+            // 刻意不落盘：这类文本不进会话历史，后续轮次也就不会把它当上下文回灌。
+            // 代价是刷新后这段对话不显示——可以接受，它本来就不是一次正常的对话
+            return AgentTurnResult.text(PRE_ROUTE_BLOCK_REPLY);
+        }
+
+        // 2.2) 角色重置（v0.30）：命中覆盖式话术（「忽略之前的指令」这类）时推进上下文地平线，
+        //      此后不再把地平线之前的对话作为依据。**不拦**——同一句话既是注入的经典开场白，
+        //      也是完全正常的纠正（"忽略上面那句，我改问订单"），拦它必然误伤。
+        //      真正要防的是"让模型把先前立场当既定事实"，那由地平线解决。
+        long horizon = constraintOn ? memoryService.contextResetAt(userId, sessionId) : 0L;
+        boolean resetFired = constraintOn && constraint.isResetOnOverride() && route.reset();
+        String coldStartNote = "";
+        if (resetFired) {
+            horizon = memoryService.markContextReset(userId, sessionId);
+            auditService.recordContextReset(userId, sessionId, route.ruleId());
+            coldStartNote = AgentPrompts.buildColdStartNote();
+            log.info("命中覆盖式话术，已推进上下文地平线 sessionId={} rule={}", sessionId, route.ruleId());
+        }
+
+        // 3) 当前轮用户文本：输入 + 已采信的回执；未采信的另起一段说明，让模型知道它们不算数
         String userText = AgentPrompts.buildUserContent(request.message(), consumed.matched());
         String unmatchedNote = AgentPrompts.buildUnmatchedNote(consumed.unmatched().size());
-        if (!StringUtils.hasText(userText) && !StringUtils.hasText(unmatchedNote)) {
+        // 3.1) 本轮随消息附上的文档（若有）
+        String documentNote = buildDocumentNote(request.documentId(), userId, sessionId);
+        if (!StringUtils.hasText(userText) && !StringUtils.hasText(unmatchedNote)
+                && !StringUtils.hasText(documentNote)) {
             return AgentTurnResult.empty();
         }
 
-        // 3) 上一轮「单轮操作超限」纠偏提示：读取即消费（只影响紧随其后的一轮），且不写入会话记忆。
+        // 3.5) 上一轮「单轮操作超限」纠偏提示：读取即消费（只影响紧随其后的一轮），且不写入会话记忆。
         //    刻意放在空轮早退之后——空轮不该把提示消费掉。
         int maxToolsPerTurn = Math.max(1, properties.getMaxToolsPerTurn());
         String overflowNote = AgentPrompts.buildOverflowNote(maxToolsPerTurn,
                 memoryService.takeToolOverflow(userId, sessionId));
-        // 送给模型的版本 = 用户内容 + 两类系统提醒；落盘仍用 userText（不含提醒），避免污染历史
-        String promptText = joinNotes(userText, unmatchedNote, overflowNote);
+
+        // 3.6) 注意力锚定（v0.30）：把硬约束压成一小段，放在**每轮用户消息的末尾**。
+        //    System Prompt 在上下文最前面，长对话里模型对它的注意力会衰减（越靠中间越容易被忽略）；
+        //    消息末尾离生成位置最近，是成本最低的锚定位置（每轮约 150 字，只进模型上下文）。
+        String digest = constraintOn && constraint.isAttentionDigest()
+                ? AgentPrompts.buildConstraintDigest() : "";
+
+        // 送给模型的版本 = 用户内容 + 冷启动提要 + 文档 + 系统提醒 + 约束提要；
+        // 落盘仍用 userText（不含这些提醒），避免它们被当成"用户说过的话"存进历史
+        String promptText = joinNotes(userText, coldStartNote, documentNote, unmatchedNote, overflowNote, digest);
 
         // 3.5) 会话内操作次数上限（防无限确认/循环）：每次“确认后执行”计一次，超限引导清空会话。
         //      只统计「已采信」的回执——否则伪造回执可以白白耗光用户的会话操作配额（配额是可耗尽资源）。
@@ -156,10 +220,14 @@ public class AgentTurnService {
         List<Message> messages = new ArrayList<>();
         // 注入「消费后仍在挂起」的操作意图：页面刷新后用户说“继续”时模型仍能精确复述（挂起-恢复）。
         // 不再是“有回执就一律清空”——挂起意图现在由「命中即消费」驱动，未确认的仍是有效上下文。
-        List<AgentToolCall> pendingOps = memoryService.pending(userId, sessionId);
+        //
+        // 例外：本轮刚触发重置时不注入。挂起意图是**此前**由模型生成的（其 purpose/elementText 又抄自
+        // 用户可写的页面内容），立刻把它摆回模型面前，等于刚清干净又自己把旧立场端了上去。
+        // 挂起态本身没被删，用户回头点那张卡片依然有效（回执校验走的是服务端下发记录，与这里无关）。
+        List<AgentToolCall> pendingOps = resetFired ? List.of() : memoryService.pending(userId, sessionId);
         messages.add(new SystemMessage(AgentPrompts.buildSystem(
                 userId, userRole, request.context(), kbContext, buildPendingNote(pendingOps))));
-        for (HistoryEntry entry : trimHistory(userId, sessionId)) {
+        for (HistoryEntry entry : trimHistory(userId, sessionId, horizon)) {
             if ("assistant".equals(entry.role())) {
                 messages.add(new AssistantMessage(entry.content()));
             } else {
@@ -295,8 +363,18 @@ public class AgentTurnService {
                     log.warn("模型同轮混合了 {} 个只读查询与 {} 个写操作，已只保留写操作 sessionId={}",
                             readOnly.size(), write.size(), sessionId);
                 }
+                // 预填草稿先过闸门：空草稿不发卡片，把原因回灌给模型让它自己修正后重来
+                // （与只读工具闸门同一思路；其它写工具 navigate/click 原样放行）
+                PrefillGuard.Result screened = prefillGuard.screen(write);
+                if (screened.accepted().isEmpty()) {
+                    log.warn("预填草稿未通过闸门，回灌纠偏 sessionId={}", sessionId);
+                    messages.add(AssistantMessage.builder().content(turnText).toolCalls(toolCalls).build());
+                    messages.add(ToolResponseMessage.builder().responses(screened.rejected()).build());
+                    continue;
+                }
                 text = turnText;
-                return new TurnLoopResult(text, write.stream().map(this::toAgentToolCall).toList(), false);
+                return new TurnLoopResult(text,
+                        screened.accepted().stream().map(this::toAgentToolCall).toList(), false);
             }
 
             // 只剩只读：检查闸门后执行
@@ -430,6 +508,24 @@ public class AgentTurnService {
             boolean llmFailed) {
     }
 
+    /**
+     * 取本轮附上的文档并拼成提示词块；没附上、或 documentId 与会话中现存的那份对不上时返回空串。
+     *
+     * <p>对不上就静默不注入：前端回传的是它收到的那一份，若期间用户又传了别的文件（覆盖了存储），
+     * 旧 id 不该再捞出新的正文来。宁可不注入（模型会反问缺什么），也不要注入一份用户没预期的东西。</p>
+     */
+    private String buildDocumentNote(String documentId, Long userId, String sessionId) {
+        if (!StringUtils.hasText(documentId)) {
+            return "";
+        }
+        AgentDocumentService.StoredDocument doc = documentService.load(userId, sessionId, documentId);
+        if (doc == null) {
+            log.info("本轮携带的文档已不存在或与当前会话不匹配，已忽略 sessionId={}", sessionId);
+            return "";
+        }
+        return AgentPrompts.buildDocumentNote(doc.name(), doc.summary(), doc.text(), doc.truncated());
+    }
+
     /** 把用户内容与若干条「系统提醒」拼成最终送给模型的本轮消息（空项自动跳过，项间空行分隔）。 */
     private String joinNotes(String userText, String... notes) {
         StringBuilder sb = new StringBuilder(userText == null ? "" : userText);
@@ -453,9 +549,20 @@ public class AgentTurnService {
      * 丢掉前半句会让模型以为那次操作<b>已经确认执行过了</b>，进而编造执行结果。</p>
      *
      * <p>最新一轮<b>无条件</b>保留（即使它自己就超预算）：它承载着用户此刻的问题，丢了整轮对话就没意义了。</p>
+     *
+     * @param horizon 上下文地平线（v0.30）：早于它的历史条目直接排除（0 = 无地平线，不过滤）。
+     *                过滤发生在分组之前——先滤掉整轮，就不会出现"半个轮"被当成一轮的错位
      */
-    private List<HistoryEntry> trimHistory(Long userId, String sessionId) {
-        List<List<HistoryEntry>> rounds = groupByRound(memoryService.recent(userId, sessionId));
+    private List<HistoryEntry> trimHistory(Long userId, String sessionId, long horizon) {
+        List<HistoryEntry> history = memoryService.recent(userId, sessionId);
+        if (horizon > 0) {
+            int before = history.size();
+            history = history.stream().filter(entry -> entry.ts() >= horizon).toList();
+            if (history.size() < before) {
+                log.info("上下文地平线生效，排除 {} 条重置前的历史 sessionId={}", before - history.size(), sessionId);
+            }
+        }
+        List<List<HistoryEntry>> rounds = groupByRound(history);
         int budget = Math.max(1000, properties.getMaxContextChars());
         List<List<HistoryEntry>> keep = new ArrayList<>();
         int used = 0;
@@ -641,6 +748,9 @@ public class AgentTurnService {
         String action = switch (call.name()) {
             case "navigate_to" -> "navigate";
             case "click_element" -> "click";
+            // v0.28：预填开店申请。它不是 DOM 操作，前端不交给 domExecutor 执行，
+            // 而是把 draft 写进 store、跳转到申请页由页面消费（见 CopilotWidget.confirmTool）
+            case "prefill_shop_application" -> "prefill";
             default -> call.name();
         };
         // nonce 由服务端生成，随 SSE 下发给前端、由前端在回执中原样带回；服务端凭它确认"该回执确实对应

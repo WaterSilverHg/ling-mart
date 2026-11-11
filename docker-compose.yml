@@ -87,9 +87,22 @@ services:
   # 链路追踪（Zipkin UI：http://localhost:9411）
   # 随 `docker compose up -d` 默认启动，各服务 ZIPKIN_ENABLED 默认 true（共享配置），无需额外操作。
   # 只想跑基础设施不上报：设 ZIPKIN_ENABLED=false，或用 docker compose up -d <服务名> 指名启动。
+  #
+  # 存储：**落 Elasticsearch，不用默认的内存存储**。
+  #   默认内存存储的代价：容器一重启（含 `docker compose up -d` 重建、Docker Desktop 重启）数据全没，
+  #   压测跑完再去翻就什么都看不到；而且 Prometheus 每 15s 抓一次 /actuator/prometheus、
+  #   各类 @Scheduled 各占一条 trace，内存里很快被噪音冲掉。
+  #   索引自动创建（默认 7 天滚动 + 3 天 ILM 便于清理），索引前缀 zipkin。
+  # ES 已关安全认证（xpack.security.enabled=false），所以无需账号密码。
   zipkin:
     image: openzipkin/zipkin:3.4
     container_name: lingmart-zipkin
+    environment:
+      - STORAGE_TYPE=elasticsearch
+      - ES_HOSTS=http://elasticsearch:9200
+      - ES_INDEX=zipkin
+    depends_on:
+      - elasticsearch
     ports:
       - "9411:9411"
     restart: unless-stopped
@@ -147,9 +160,47 @@ services:
       - ollama-data:/root/.ollama
     restart: unless-stopped
 
+  # -----------------------------------------------------------
+  # 监控：Prometheus 抓取 9 个服务的 /actuator/prometheus；Grafana 预置数据源与总览看板
+  # -----------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: lingmart-prometheus
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    # 容器内访问宿主机上的业务服务（java -jar / IDEA 启动）；Linux 上需要这条映射
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: lingmart-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
 volumes:
   mysql-data:
   seata-session:
   nacos-data:
   chroma-data:
   ollama-data:
+  prometheus-data:
+  grafana-data:

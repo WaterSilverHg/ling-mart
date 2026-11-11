@@ -1,0 +1,50 @@
+# =============================================================
+# 轻营 · Prometheus 抓取配置
+#
+# 抓取对象：9 个服务（auth/shop/product/ware/order/search/chat/agent/gateway）
+#           各自的 /actuator/prometheus 端点。
+#
+# 地址说明：
+#   - 服务以 `java -jar` / IDEA 跑在**宿主机**时，容器里的 Prometheus 通过
+#     host.docker.internal 访问（docker-compose.yml 已配 extra_hosts）。
+#   - 若用 docker-compose.business.yml 把业务服务也跑在容器里，host.docker.internal
+#     就指不到它们了；此时把 targets 改成容器服务名（如 lingmart-auth:8000）。
+#
+# 每个 target 显式打 application 标签：Spring Boot 默认不一定给指标加应用名，
+# 靠 Prometheus 侧打标签最稳，Grafana 里可以直接 by (application) 聚合。
+# =============================================================
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: lingmart
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          application: lingmart-auth
+      - targets: ["host.docker.internal:8100"]
+        labels:
+          application: lingmart-shop
+      - targets: ["host.docker.internal:10001"]
+        labels:
+          application: lingmart-product
+      - targets: ["host.docker.internal:11000"]
+        labels:
+          application: lingmart-ware
+      - targets: ["host.docker.internal:9000"]
+        labels:
+          application: lingmart-order
+      - targets: ["host.docker.internal:12000"]
+        labels:
+          application: lingmart-search
+      - targets: ["host.docker.internal:13000"]
+        labels:
+          application: lingmart-chat
+      - targets: ["host.docker.internal:14000"]
+        labels:
+          application: lingmart-agent
+      - targets: ["host.docker.internal:88"]
+        labels:
+          application: lingmart-gateway

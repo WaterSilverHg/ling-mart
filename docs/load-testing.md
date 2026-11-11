@@ -25,7 +25,7 @@
 | 文件 | 作用 |
 | --- | --- |
 | `lingmart-core.k6.js` | 压测脚本本体（读 + 购物车 + 下单 + 支付四个场景） |
-| `seed/seed-loadtest.sql` | 播种：40 个账号（20 买家 / 20 卖家）+ 20 店铺 + 500 SPU + 1500 SKU + 库存行 |
+| `seed/seed-loadtest.sql` | 播种：40 个账号（20 买家 / 20 卖家）+ **20 条买家默认收货地址** + 20 店铺 + 500 SPU + 1500 SKU + 库存行 |
 | `seed/seed-loadtest.bat` / `.sh` | 播种包装：执行 SQL → 调 `post-seed.mjs` 写 ES |
 | `seed/post-seed.mjs` | 逐店重建 ES 索引 + 搜索冒烟；`--clean` 则反过来清理 ES |
 | `seed/teardown-loadtest.sql` | 清理 DB 侧（按固定 ID 区间，不碰真实数据） |
@@ -72,6 +72,15 @@ bash scripts/load-test/seed/seed-loadtest.sh
   播种脚本会直接报 `SEED ABORTED: admin user not found` 并中止（不会插入一批登录不了的账号）。
 - **管理员本身不参与压测**：它是 `ROLE_ADMIN`，语义上只能管理、不能下单，
   所以买家另造了 20 个 `ROLE_USER`。管理员只在 `post-seed.mjs` 里用来调重建索引入口。
+
+### 3.2.1 收货地址（v0.39 起必须有）
+
+下单现在会解析收货地址：`addressId` 不传时取默认地址，一条都没有则**拒绝下单**
+（`请先添加收货地址`）。因此播种脚本已为 20 个买家各插一条默认地址，
+`order` 场景的请求体**不需要改**（沿用原协议即可）。
+
+> 若你用的是**升级前**的旧库且没跑 `sql/upgrade/2026-11-10-address-and-receiver.sql`，
+> 播种会因 `user_address` 表不存在而失败——请先执行迁移。
 
 ### 3.3 商品要能被搜到，必须进 ES
 
@@ -132,7 +141,7 @@ k6 run -e ENABLE_WRITE=0 scripts/load-test/lingmart-core.k6.js
 | `W_CART` / `W_ORDER` / `W_PAY` | `15` / `15` / `10` | 写场景权重（百分比），读场景吃剩下的 |
 | `VUS` | 空 | 传了走**恒定并发**模式（配合 `DURATION`）；不传走默认梯度 |
 | `DURATION` | `60s` | 恒定并发模式的持续时间 |
-| `P95_MS` | `800` | 全局 p95 门槛（毫秒） |
+| `P95_MS` | `800` | 成功请求的 p95 门槛（毫秒；**不含 429**，见第六节） |
 | `FAIL_RATE` | `0.05` | 失败率门槛（0.05 = 5%） |
 | `SLEEP` | `1` | 每次迭代后的思考时间（秒） |
 
@@ -162,21 +171,45 @@ k6 run -e ENABLE_WRITE=0 scripts/load-test/lingmart-core.k6.js
 断言不只校验协议层，还校验数据（`detail` 返回的 `spuId` 与请求一致、`skus` 非空、价格为正、
 支付后 `payStatus=1`、购物车改数量后 `num` 真的变了），所以「绿」代表链路真的通。
 
-**分链路 p95**：每个请求都带 `tags: {flow: 'read'|'cart'|'order'|'pay'}`，
+**分链路 p95 只看 `http_ok_duration`**：每个请求都带 `tags: {flow: 'read'|'cart'|'order'|'pay'}`，
 脚本给这些子指标都定义了门槛（否则 k6 不会在汇总里打印它们），所以结束时会看到：
 
 ```
-http_req_duration{flow:read}........: avg=... p(95)=... p(99)=...
-http_req_duration{flow:cart}........: ...
-http_req_duration{flow:order}.......: ...
-http_req_duration{flow:pay}.........: ...
-http_req_failed{flow:read}..........: 0.00%
+http_ok_duration{flow:read}........: avg=... p(95)=... p(99)=...
+http_ok_duration{flow:cart}........: ...
+http_ok_duration{flow:order}.......: ...
+http_ok_duration{flow:pay}.........: ...
+http_req_failed{flow:read}.........: 0.00%
+http_ok_requests{flow:read}........: ...
+flow_iterations{flow:read}.........: ...
 ...
 ```
 
-默认门槛：全局 `p(95)<800ms`；`read<500ms`；`cart/order/pay<1500ms`；`checks>95%`。
+默认门槛：`read<500ms`；`cart/order/pay<1500ms`；`checks>95%`。
 
-**限流（429）单独看 `http_429_throttled`**：它被**排除在 `http_req_failed` 与所有断言之外**，
+> ⚠️ **不要用 `http_req_duration` 的 p95 下结论**。它包含 429（被限流的请求通常几十毫秒就返回），
+> 会把分布整体拉低，于是出现"并发越高、p95 越低"的假象。而且 429 被 `http.expectedStatuses`
+> 标成了预期响应，连 `http_req_duration{expected_response:true}` 也排除不掉它。
+> 所以延迟一律看 `http_ok_duration`——只含 **HTTP 2xx 且业务 code=200** 的请求。
+
+**先看这四个数：**
+
+| 指标 | 含义 | 怎么用 |
+| --- | --- | --- |
+| `http_ok_requests` 的 rate | **有效吞吐**（成功请求/秒，不含 429） | 判断"系统真正服务了多少"，而不是发了多少 |
+| `http_429_throttled` 的 rate | 被限流的请求/秒 | 与有效吞吐相加 = 总请求速率 |
+| 限流占比 = 429 ÷ (有效 + 429) | 多少请求被主动泄流 | 占比高说明**撞到配置上限**，不是系统扛不住 |
+| `http_ok_duration{flow}` 的 p95/p99 | 成功请求的延迟 | 报性能只报这个 |
+
+**业务失败按原因看 `business_errors`**：HTTP 200 但 `code≠200` 的响应会被归类成
+`{flow, code, reason}`，`reason` 是归一化标签：`stock_shortage` / `self_purchase` /
+`multi_shop` / `sku_missing` / `invalid_state` / `idempotency` / `throttled` / `timeout` / `other`。
+"100 VU 下单失败 8 个"到底是哪 8 个，看这里。
+
+**每个 iteration 发了几个请求**：`http_ok_requests{flow} ÷ flow_iterations{flow}`。
+四类场景分别是 3 / 8 / 5 / 6 个请求，所以 **VU 数 ≠ 请求速率**。
+
+**限流（429）本身的口径**：它被**排除在 `http_req_failed` 与所有断言之外**，
 理由是 429 是系统按配置主动泄流、请求根本没被服务——把它算进业务失败率，门槛就变成
 "你给搜索配了多少 QPS"，换台机器/改个阈值就红，毫无信号价值。真实的失败（500/503/超时/断连）
 照常计入。想让 429 也计入失败：`-e COUNT_429_AS_FAILURE=1`。

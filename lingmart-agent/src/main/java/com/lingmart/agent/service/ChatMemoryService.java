@@ -46,6 +46,14 @@ public class ChatMemoryService {
     /** 单轮操作超限（模型一次发起多个动作被截断）的待注入提示 */
     private static final String OVERFLOW_KEY_PREFIX = "agent:session-overflow:";
     /**
+     * 上下文地平线（v0.30 角色重置）：该毫秒时间戳<b>之前</b>的历史不再喂给模型。
+     *
+     * <p>存的是时间而不是"已重置"这个布尔值：这样重置是<b>可叠加</b>的——
+     * 每次命中覆盖式话术都把地平线往后推，无需额外状态；而历史条目本来就带 {@code ts}
+     * （见 {@link HistoryEntry}），过滤只是一次比较。</p>
+     */
+    private static final String RESET_KEY_PREFIX = "agent:session-reset-at:";
+    /**
      * 单用户会话索引：ZSET，member=sessionId、score=最后活跃毫秒时间戳。
      *
      * <p>两个用途：① 会话数上限的淘汰依据（取 score 最小的最久未活跃会话）；
@@ -56,6 +64,11 @@ public class ChatMemoryService {
     private final StringRedisTemplate redis;
     private final ObjectMapper objectMapper;
     private final AgentProperties properties;
+    /**
+     * 会话文档：本类只用到它的 {@code delete}——会话的数据生命周期归这里统一管，
+     * 文档是会话数据的一部分（见 {@link #deleteSessionData}）。文档服务不认识本类，依赖是单向的。
+     */
+    private final AgentDocumentService documentService;
 
     private final TypeReference<Map<String, Object>> mapType = new TypeReference<>() {
     };
@@ -64,10 +77,12 @@ public class ChatMemoryService {
     private final TypeReference<List<String>> stringListType = new TypeReference<>() {
     };
 
-    public ChatMemoryService(StringRedisTemplate redis, ObjectMapper objectMapper, AgentProperties properties) {
+    public ChatMemoryService(StringRedisTemplate redis, ObjectMapper objectMapper, AgentProperties properties,
+                             AgentDocumentService documentService) {
         this.redis = redis;
         this.objectMapper = objectMapper;
         this.properties = properties;
+        this.documentService = documentService;
     }
 
     /** 追加一条 user 消息并修剪 + 续期。 */
@@ -362,6 +377,52 @@ public class ChatMemoryService {
         }
     }
 
+    /**
+     * 推进上下文地平线到「现在」（v0.30 角色重置），返回写入的时间戳。
+     *
+     * <p><b>为什么是推进而不是清空历史</b>：清空会连正常的上下文一起赔进去，而且用户眼前还看得见
+     * 那些消息——"记忆突然消失"比"模型不知道刚才聊了什么"更难解释。推进地平线是非破坏性的：
+     * 消息都还在（前端展示、审计都在），只是从此刻起不再作为判断依据，且会随
+     * {@code max-messages} 自然滑出存储。</p>
+     *
+     * <p>写入失败只告警并返回 0：拿不到地平线就等于没重置，退回改动前的行为，
+     * 比抛异常让整轮对话失败要好。</p>
+     *
+     * @return 写入的时间戳（毫秒）；失败返回 0
+     */
+    public long markContextReset(Long userId, String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return 0L;
+        }
+        long now = System.currentTimeMillis();
+        try {
+            redis.opsForValue().set(resetKey(userId, sessionId), String.valueOf(now),
+                    properties.getMemory().getTtlHours(), TimeUnit.HOURS);
+            return now;
+        } catch (Exception e) {
+            log.warn("写入上下文地平线失败 sessionId={}", sessionId, e);
+            return 0L;
+        }
+    }
+
+    /**
+     * 读取当前会话的上下文地平线。
+     *
+     * @return 地平线时间戳（毫秒）；无地平线或 Redis 异常返回 {@code 0}（0 = 不过滤任何历史）
+     */
+    public long contextResetAt(Long userId, String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return 0L;
+        }
+        try {
+            String v = redis.opsForValue().get(resetKey(userId, sessionId));
+            return v == null ? 0L : parseLong(v);
+        } catch (Exception e) {
+            log.warn("读取上下文地平线失败 sessionId={}", sessionId, e);
+            return 0L;
+        }
+    }
+
     /** 会话内已执行的页面操作次数。 */
     public long toolOps(Long userId, String sessionId) {
         String v = redis.opsForValue().get(opsKey(userId, sessionId));
@@ -426,12 +487,21 @@ public class ChatMemoryService {
         }
     }
 
-    /** 删除某会话的全部数据键（不含会话索引本身，索引由调用方按语义处理）。 */
+    /**
+     * 删除某会话的全部数据键（不含会话索引本身，索引由调用方按语义处理）。
+     *
+     * <p>会话文档也在这里一并删除：它是<b>会话数据</b>，生命周期与会话一致——用户点「清空会话」
+     * 或会话被淘汰时，他上传的那份材料不应还留在 Redis 里（既占空间，也超出用户对"清空"的预期）。</p>
+     */
     private void deleteSessionData(Long userId, String sessionId) {
         redis.delete(sessionKey(userId, sessionId));
         redis.delete(opsKey(userId, sessionId));
         redis.delete(pendingKey(userId, sessionId));
         redis.delete(overflowKey(userId, sessionId));
+        // 地平线必须一起清：残留的话，用户点「清空会话」之后新开的对话，历史会被整段裁掉——
+        // 表现为"清空后助手什么都不记得"，而历史刚才明明已经全删干净了，极难排查
+        redis.delete(resetKey(userId, sessionId));
+        documentService.delete(userId, sessionId);
     }
 
     /** 会话记忆 Key：绑定 userId，防止跨用户枚举 sessionId。 */
@@ -449,6 +519,10 @@ public class ChatMemoryService {
 
     private String overflowKey(Long userId, String sessionId) {
         return OVERFLOW_KEY_PREFIX + uidPart(userId) + ":" + sessionId;
+    }
+
+    private String resetKey(Long userId, String sessionId) {
+        return RESET_KEY_PREFIX + uidPart(userId) + ":" + sessionId;
     }
 
     /** 单用户会话索引 Key（ZSET）。注意这里按 userId 隔离，不含 sessionId。 */
