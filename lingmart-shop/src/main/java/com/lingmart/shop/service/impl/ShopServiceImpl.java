@@ -27,6 +27,7 @@ import com.lingmart.shop.mapper.ShopApplicationMapper;
 import com.lingmart.shop.mapper.ShopMapper;
 import com.lingmart.shop.service.ShopService;
 import com.lingmart.shop.vo.ApplicationVO;
+import com.lingmart.shop.vo.ShopFulfillmentVO;
 import com.lingmart.shop.vo.ShopStorefrontVO;
 import com.lingmart.shop.vo.ShopVO;
 import io.seata.spring.annotation.GlobalTransactional;
@@ -103,6 +104,7 @@ public class ShopServiceImpl implements ShopService {
             update.setShopName(dto.getShopName());
             update.setShopLogo(dto.getShopLogo());
             update.setDescription(dto.getDescription());
+            applyFulfillment(dto, update);
             update.setStatus(SHOP_PENDING);
             update.setReviewStatus(REVIEW_PENDING);
             update.setDraftContent(null);
@@ -115,6 +117,7 @@ public class ShopServiceImpl implements ShopService {
             created.setShopName(dto.getShopName());
             created.setShopLogo(dto.getShopLogo());
             created.setDescription(dto.getDescription());
+            applyFulfillment(dto, created);
             created.setStatus(SHOP_PENDING);
             created.setReviewStatus(REVIEW_PENDING);
             try {
@@ -172,6 +175,10 @@ public class ShopServiceImpl implements ShopService {
         draft.setShopName(dto.getShopName());
         draft.setShopLogo(dto.getShopLogo());
         draft.setDescription(dto.getDescription());
+        // 未传 = 沿用旧值（不能当成「关闭快递」：老客户端不带这个字段，静默关掉会打断卖家的发货方式）
+        draft.setSupportExpress(dto.getSupportExpress() == null ? null : (dto.getSupportExpress() ? 1 : 0));
+        draft.setAddress(dto.getAddress());
+        draft.setContactPhone(dto.getContactPhone());
         Shop update = new Shop();
         update.setId(shop.getId());
         update.setReviewStatus(REVIEW_REVIEWING);
@@ -299,6 +306,12 @@ public class ShopServiceImpl implements ShopService {
             update.setShopName(newShopName);
             update.setShopLogo(draft.getShopLogo());
             update.setDescription(draft.getDescription());
+            // 履约配置同样走「宽松重审」：审核通过后才生效
+            if (draft.getSupportExpress() != null) {
+                update.setSupportExpress(draft.getSupportExpress());
+            }
+            update.setAddress(draft.getAddress());
+            update.setContactPhone(draft.getContactPhone());
             update.setDraftContent(null);
             update.setReviewStatus(REVIEW_APPROVED);
             recordAudit(operatorId, "SHOP_REVIEW", shopId, 1, null);
@@ -398,6 +411,21 @@ public class ShopServiceImpl implements ShopService {
     }
 
     @Override
+    public ShopFulfillmentVO getFulfillment(Long shopId) {
+        Shop shop = shopId == null ? null : shopMapper.selectById(shopId);
+        if (shop == null || !Objects.equals(shop.getStatus(), SHOP_ENABLED)) {
+            return null;
+        }
+        ShopFulfillmentVO vo = new ShopFulfillmentVO();
+        vo.setShopId(shop.getId());
+        vo.setShopName(shop.getShopName());
+        vo.setSupportExpress(shop.getSupportExpress());
+        vo.setAddress(shop.getAddress());
+        vo.setContactPhone(shop.getContactPhone());
+        return vo;
+    }
+
+    @Override
     public ShopStorefrontVO getStorefront(Long shopId) {
         Shop shop = shopId == null ? null : shopMapper.selectById(shopId);
         if (shop == null || !Objects.equals(shop.getStatus(), SHOP_ENABLED)) {
@@ -408,6 +436,9 @@ public class ShopServiceImpl implements ShopService {
         vo.setShopName(shop.getShopName());
         vo.setShopLogo(shop.getShopLogo());
         vo.setDescription(shop.getDescription());
+        // 履约能力与门店地址对买家公开：自提前需要知道店铺支不支持快递、在哪儿取货
+        vo.setSupportExpress(shop.getSupportExpress());
+        vo.setAddress(shop.getAddress());
 
         // 店主公开信息（仅头像/昵称，手机号不外发——店铺主页不暴露联系方式）
         R<UserInfo> userResult = authFeignClient.getUser(shop.getUserId());
@@ -439,7 +470,23 @@ public class ShopServiceImpl implements ShopService {
         info.setShopName(shop.getShopName());
         info.setShopLogo(shop.getShopLogo());
         info.setStatus(shop.getStatus());
+        // 履约能力：下单时 order 服务要据此判断买家能否选快递，并快照自提门店信息
+        info.setSupportExpress(shop.getSupportExpress());
+        info.setAddress(shop.getAddress());
+        info.setContactPhone(shop.getContactPhone());
         return info;
+    }
+
+    /**
+     * 写入履约配置（首次申请与被拒后重新申请共用）。
+     *
+     * @param dto    申请参数
+     * @param target 目标店铺实体
+     */
+    private static void applyFulfillment(ApplyShopDTO dto, Shop target) {
+        target.setSupportExpress(Boolean.TRUE.equals(dto.getSupportExpress()) ? 1 : 0);
+        target.setAddress(dto.getAddress());
+        target.setContactPhone(dto.getContactPhone());
     }
 
     private void requireUserId(Long userId) {
@@ -470,6 +517,9 @@ public class ShopServiceImpl implements ShopService {
         vo.setShopName(shop.getShopName());
         vo.setShopLogo(shop.getShopLogo());
         vo.setDescription(shop.getDescription());
+        vo.setSupportExpress(shop.getSupportExpress());
+        vo.setAddress(shop.getAddress());
+        vo.setContactPhone(shop.getContactPhone());
         vo.setStatus(shop.getStatus());
         vo.setReviewStatus(shop.getReviewStatus());
         vo.setDraftContent(shop.getDraftContent());

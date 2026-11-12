@@ -20,7 +20,9 @@ import com.lingmart.order.mapper.OrderMapper;
 import com.lingmart.order.mapper.OrderPaidEventMapper;
 import com.lingmart.order.service.AddressService;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lingmart.order.support.MybatisLambdaCache;
 import org.apache.ibatis.cursor.Cursor;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -38,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -76,6 +79,19 @@ class OrderServiceImplTest {
     @InjectMocks
     private OrderServiceImpl service;
 
+    /**
+     * 初始化 MyBatis-Plus 的 Lambda 缓存。
+     *
+     * <p>本类之前的通过与否取决于 {@code OrderFlowIntegrationTest} 是否先跑过——
+     * 退款用例里的状态守卫会调用 {@code LambdaUpdateWrapper#set(column, null)}，
+     * 没有缓存就抛 {@code can not find lambda cache}。CI 上类顺序不同就会失败，
+     * 因此这里显式初始化，不依赖其它测试类。</p>
+     */
+    @BeforeAll
+    static void initMybatisPlusLambdaCache() {
+        MybatisLambdaCache.initOrderModule();
+    }
+
     // ==================== 下单 ====================
 
     @Test
@@ -93,6 +109,7 @@ class OrderServiceImplTest {
     @Test
     void createOrder_shouldSucceedAndLockStock() {
         when(shopFeignClient.getShopByUserId(1L)).thenReturn(R.ok(shop(999L)));
+        when(shopFeignClient.getShopById(1L)).thenReturn(R.ok(shop(1L)));
         when(productFeignClient.getSkuInfo(101L)).thenReturn(R.ok(sku(1L)));
         when(orderMapper.insert(any(Order.class))).thenAnswer(inv -> {
             Order o = inv.getArgument(0);
@@ -101,13 +118,44 @@ class OrderServiceImplTest {
         });
         when(orderItemMapper.insert(any(OrderItem.class))).thenReturn(1);
         when(wareFeignClient.lockStock(any())).thenReturn(R.ok());
-        when(addressService.resolveForCheckout(any(), any())).thenReturn(address());
 
+        // 不传 deliveryMode → 默认到店自提，不解析收货地址（地址相关断言见快递用例）
         String orderSn = service.createOrder(1L, null, dto());
 
         assertNotNull(orderSn);
         verify(orderMapper).insert(any(Order.class));
         verify(wareFeignClient).lockStock(any());
+    }
+
+    @Test
+    void createOrder_shouldRejectExpressWhenShopNotSupport() {
+        // 店铺只做自提（supportExpress=0），买家却选了快递 → 明确拒绝，不建单
+        when(shopFeignClient.getShopByUserId(1L)).thenReturn(R.ok(shop(999L)));
+        when(productFeignClient.getSkuInfo(101L)).thenReturn(R.ok(sku(1L)));
+        ShopInfo seller = shop(1L);
+        seller.setSupportExpress(0);
+        when(shopFeignClient.getShopById(1L)).thenReturn(R.ok(seller));
+
+        OrderCreateDTO dto = dto();
+        dto.setDeliveryMode(1);
+
+        BizException e = assertThrows(BizException.class, () -> service.createOrder(1L, null, dto));
+        assertTrue(e.getMessage().contains("不支持快递"));
+        verify(orderMapper, never()).insert(any(Order.class));
+    }
+
+    @Test
+    void createOrder_shouldRejectPickupWhenShopHasNoAddress() {
+        // 店铺没配自提地址：买家不知道该去哪儿取货 → 拒绝，而不是生成一条无履约信息的订单
+        when(shopFeignClient.getShopByUserId(1L)).thenReturn(R.ok(shop(999L)));
+        when(productFeignClient.getSkuInfo(101L)).thenReturn(R.ok(sku(1L)));
+        ShopInfo seller = shop(1L);
+        seller.setAddress(null);
+        when(shopFeignClient.getShopById(1L)).thenReturn(R.ok(seller));
+
+        BizException e = assertThrows(BizException.class, () -> service.createOrder(1L, null, dto()));
+        assertTrue(e.getMessage().contains("自提地址"));
+        verify(orderMapper, never()).insert(any(Order.class));
     }
 
     @Test
@@ -263,6 +311,7 @@ class OrderServiceImplTest {
 
     @Test
     void ship_shouldRejectExpressWithoutCompany() {
+        stubSellerOrderWithoutMode();
         assertThrows(BizException.class, () -> service.ship(1L, "SN", shipDto(1, null, "SF123")));
         assertThrows(BizException.class, () -> service.ship(1L, "SN", shipDto(1, "顺丰速运", "  ")));
         verify(orderMapper, never()).update(any(Order.class), any());
@@ -270,15 +319,32 @@ class OrderServiceImplTest {
 
     @Test
     void ship_shouldRejectNoLogisticsCarryingTrackingNo() {
-        // 无需物流却传了单号 → 明确报错，而不是静默丢弃（静默会掩盖前端 bug）
+        // 到店自提却传了单号 → 明确报错，而不是静默丢弃（静默会掩盖前端 bug）
+        stubSellerOrderWithoutMode();
         assertThrows(BizException.class, () -> service.ship(1L, "SN", shipDto(2, "顺丰速运", "SF123")));
         verify(orderMapper, never()).update(any(Order.class), any());
     }
 
     @Test
     void ship_shouldRejectUnknownDeliveryMode() {
+        stubSellerOrderWithoutMode();
         assertThrows(BizException.class, () -> service.ship(1L, "SN", shipDto(9, null, null)));
         assertThrows(BizException.class, () -> service.ship(1L, "SN", shipDto(null, null, null)));
+        verify(orderMapper, never()).update(any(Order.class), any());
+    }
+
+    @Test
+    void ship_shouldRejectChangingFulfillmentMode() {
+        // 下单时已确定是自提，卖家不能再按快递发出去
+        when(shopFeignClient.getShopByUserId(1L)).thenReturn(R.ok(shop(7L)));
+        Order o = order(1L, "SN", 1);
+        o.setShopId(7L);
+        o.setDeliveryMode(2);
+        when(orderMapper.selectOne(any())).thenReturn(o);
+
+        BizException e = assertThrows(BizException.class,
+                () -> service.ship(1L, "SN", shipDto(1, "顺丰速运", "SF123")));
+        assertTrue(e.getMessage().contains("不能更改"));
         verify(orderMapper, never()).update(any(Order.class), any());
     }
 
@@ -610,7 +676,19 @@ class OrderServiceImplTest {
 
     // ==================== 辅助 ====================
 
-    /** 发货参数：mode 1=快递（需公司+单号） 2=无需物流（两者须为空） */
+    /** 发货参数：mode 1=快递（需公司+单号） 2=到店自提（两者须为空） */
+    /**
+     * 准备「卖家店铺 + 一笔本次升级前的存量订单（未记录履约方式）」。
+     *
+     * <p>存量订单没有 delivery_mode，发货方式才由请求决定——这正是几个参数校验用例要覆盖的场景。</p>
+     */
+    private void stubSellerOrderWithoutMode() {
+        when(shopFeignClient.getShopByUserId(1L)).thenReturn(R.ok(shop(7L)));
+        Order o = order(1L, "SN", 1);
+        o.setShopId(7L);
+        when(orderMapper.selectOne(any())).thenReturn(o);
+    }
+
     private ShipDTO shipDto(Integer mode, String company, String tracking) {
         ShipDTO dto = new ShipDTO();
         dto.setDeliveryMode(mode);
@@ -644,6 +722,10 @@ class OrderServiceImplTest {
         shop.setId(id);
         shop.setShopName("测试店铺");
         shop.setStatus(1);
+        // v0.40：默认走「到店自提」，因此下单必须能拿到自提地址
+        shop.setAddress("杭州市西湖区文一西路 1 号");
+        shop.setContactPhone("0571-88888888");
+        shop.setSupportExpress(0);
         return shop;
     }
 

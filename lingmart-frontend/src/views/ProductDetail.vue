@@ -95,6 +95,8 @@ function buyNow() {
   checkoutWith([{
     skuId: currentSku.value.id,
     num: num.value,
+    // 结算页据此查询店铺履约能力（自提地址 / 是否支持快递）
+    shopId: product.value.shopId,
     spuTitle: product.value.title,
     skuTitle: currentSku.value.title,
     skuImage: currentSku.value.images?.[0],

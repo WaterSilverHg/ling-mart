@@ -90,8 +90,11 @@ public class OrderServiceImpl implements OrderService {
     private static final int REFUND_REJECTED = 3;     // 退款拒绝
 
     /** 发货方式（v0.27）：必须显式选择，不复用 order_status */
-    private static final int DELIVERY_EXPRESS = 1;    // 快递发货
-    private static final int DELIVERY_NO_LOGISTICS = 2; // 无需物流（自提 / 面交）
+    /** 履约方式：快递（买家下单时选择，需要收货地址） */
+    private static final int DELIVERY_EXPRESS = 1;
+
+    /** 履约方式：到店自提（买家下单时选择，无需收货地址，改为快照门店信息） */
+    private static final int DELIVERY_PICKUP = 2;
 
     private final OrderMapper orderMapper;
     private final OrderItemMapper orderItemMapper;
@@ -163,9 +166,26 @@ public class OrderServiceImpl implements OrderService {
             items.add(item);
         }
 
-        // 2. 解析收货地址并快照（本地查询，无远程调用）。放在建单之前：
-        //    没有可用地址时直接失败，不会留下一条没有收货信息的订单再回滚
-        UserAddress address = addressService.resolveForCheckout(buyerId, dto.getAddressId());
+        // 2. 解析履约方式与履约信息（全部在建单之前完成，失败时不留半条订单）
+        //    自营实体店以「到店自提」为默认；快递能不能选由店铺的 supportExpress 决定
+        int deliveryMode = resolveDeliveryMode(dto.getDeliveryMode());
+        // R.checkOk 已经解包出 data（返回 T 而非 R），不要再调 getData()
+        ShopInfo sellerShop = R.checkOk(shopFeignClient.getShopById(shopId));
+        if (sellerShop == null) {
+            throw new BizException("店铺不存在或已停业");
+        }
+        UserAddress address = null;
+        if (deliveryMode == DELIVERY_EXPRESS) {
+            if (!Integer.valueOf(1).equals(sellerShop.getSupportExpress())) {
+                log.warn("下单失败：buyerId={}, shopId={}, reason=店铺不支持快递", buyerId, shopId);
+                throw new BizException("该店铺不支持快递发货，请选择到店自提");
+            }
+            address = addressService.resolveForCheckout(buyerId, dto.getAddressId());
+        } else if (!StringUtils.hasText(sellerShop.getAddress())) {
+            // 自提必须有门店地址，否则买家不知道该去哪儿取货
+            log.warn("下单失败：buyerId={}, shopId={}, reason=店铺未配置自提地址", buyerId, shopId);
+            throw new BizException("该店铺尚未配置自提地址，暂时无法下单");
+        }
 
         // 3. 建单（订单 + 明细）
         String orderSn = OrderSnGenerator.generate();
@@ -177,12 +197,20 @@ public class OrderServiceImpl implements OrderService {
         order.setPayStatus(0);
         order.setOrderStatus(ORDER_PENDING_PAY);
         order.setBuyerRemark(dto.getBuyerRemark());
-        // 收货信息是快照：地址簿后续被修改或删除都不影响这张订单
-        order.setAddressId(address.getId());
-        order.setReceiverName(address.getReceiverName());
-        order.setReceiverPhone(address.getReceiverPhone());
-        order.setReceiverRegion(address.getProvince() + " " + address.getCity() + " " + address.getDistrict());
-        order.setReceiverDetail(address.getDetailAddress());
+        order.setDeliveryMode(deliveryMode);
+        if (address != null) {
+            // 快递：收货信息是快照，地址簿后续被修改或删除都不影响这张订单
+            order.setAddressId(address.getId());
+            order.setReceiverName(address.getReceiverName());
+            order.setReceiverPhone(address.getReceiverPhone());
+            order.setReceiverRegion(address.getProvince() + " " + address.getCity() + " " + address.getDistrict());
+            order.setReceiverDetail(address.getDetailAddress());
+        } else {
+            // 自提：快照门店信息，买家之后在该订单里就能直接看到去哪儿取货、打哪个电话
+            order.setPickupShopName(sellerShop.getShopName());
+            order.setPickupAddress(sellerShop.getAddress());
+            order.setPickupPhone(sellerShop.getContactPhone());
+        }
         order.setIdempotencyKey(StringUtils.hasText(idempotencyKey) ? idempotencyKey : null);
         try {
             orderMapper.insert(order);
@@ -474,7 +502,6 @@ public class OrderServiceImpl implements OrderService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void ship(Long userId, String orderSn, ShipDTO dto) {
-        validateShipDTO(dto);
         ShopInfo shop = requireSellerShop(userId);
         Order order = orderMapper.selectOne(new LambdaQueryWrapper<Order>().eq(Order::getOrderSn, orderSn));
         if (order == null) {
@@ -483,48 +510,106 @@ public class OrderServiceImpl implements OrderService {
         if (!Objects.equals(order.getShopId(), shop.getId())) {
             throw new BizException(ResultCode.FORBIDDEN.getCode(), "无权操作该订单");
         }
-        boolean express = dto.getDeliveryMode() == DELIVERY_EXPRESS;
+        // 履约方式在下单时就定了，卖家不能再改（改方式等于换了一个交易）。
+        // 只有本次升级前创建的存量订单 delivery_mode 为空，此时回退到请求里传的值。
+        int deliveryMode = resolveShipMode(order, dto);
+        validateShip(deliveryMode, dto);
+        boolean express = deliveryMode == DELIVERY_EXPRESS;
+
         Order update = new Order();
         update.setId(order.getId());
         update.setOrderStatus(ORDER_SHIPPED);
         update.setShipTime(LocalDateTime.now());
-        update.setDeliveryMode(dto.getDeliveryMode());
-        // 非快递方式不落公司与单号（validateShipDTO 已保证此时它们为空，这里再显式置 null 以免脏数据）
+        if (order.getDeliveryMode() == null) {
+            // 存量订单：借这次发货把履约方式补齐，之后的展示/统计口径就统一了
+            update.setDeliveryMode(deliveryMode);
+        }
+        // 自提订单不落快递信息（validateShip 已保证此时为空，这里再显式置 null 以免脏数据）
         update.setShippingCompany(express ? dto.getShippingCompany().trim() : null);
         update.setTrackingNo(express ? dto.getTrackingNo().trim() : null);
         transitionOrThrow(update, Order::getOrderStatus, List.of(ORDER_PAID), "订单状态不允许发货");
         log.info("订单发货：orderSn={}, shopId={}, 方式={}", orderSn, shop.getId(),
-                express ? "快递 " + update.getShippingCompany() + " " + update.getTrackingNo() : "无需物流");
+                express ? "快递 " + update.getShippingCompany() + " " + update.getTrackingNo()
+                        : "到店自提（备货完成，等待买家取货）");
     }
 
     /**
-     * 校验发货参数（v0.27）。
+     * 解析买家在下单时选择的履约方式。
+     *
+     * <p><b>不传时默认「到店自提」</b>：项目定位是自营实体店，自提是默认履约方式；
+     * 这也让升级前的客户端与压测脚本无需改动即可继续下单（它们不带这个字段）。</p>
+     *
+     * @param requested 请求里的 deliveryMode，可为 null
+     * @return 1 快递 / 2 到店自提
+     */
+    private static int resolveDeliveryMode(Integer requested) {
+        if (requested == null) {
+            return DELIVERY_PICKUP;
+        }
+        if (requested == DELIVERY_EXPRESS || requested == DELIVERY_PICKUP) {
+            return requested;
+        }
+        throw new BizException("履约方式不合法");
+    }
+
+    /**
+     * 解析本次发货对应的履约方式。
+     *
+     * <p>正常流程直接取订单上的值（下单时定的），并**校验请求里若带了 deliveryMode 必须一致**——
+     * 否则卖家可以把自提订单发成快递，或者反过来。存量订单（{@code delivery_mode} 为空）
+     * 没有记录过履约方式，此时才允许由请求指定。</p>
+     *
+     * @param order 订单
+     * @param dto   发货参数（deliveryMode 可为空）
+     * @return 1 快递 / 2 到店自提
+     */
+    private int resolveShipMode(Order order, ShipDTO dto) {
+        Integer requested = dto == null ? null : dto.getDeliveryMode();
+        if (order.getDeliveryMode() == null) {
+            if (requested == null) {
+                throw new BizException("请选择发货方式");
+            }
+            if (requested != DELIVERY_EXPRESS && requested != DELIVERY_PICKUP) {
+                throw new BizException("发货方式不合法");
+            }
+            return requested;
+        }
+        if (requested != null && !requested.equals(order.getDeliveryMode())) {
+            throw new BizException("该订单的履约方式为"
+                    + (order.getDeliveryMode() == DELIVERY_EXPRESS ? "快递" : "到店自提") + "，不能更改");
+        }
+        return order.getDeliveryMode();
+    }
+
+    /**
+     * 校验发货参数。
      *
      * <p>「选了快递才要单号」是**字段之间的条件依赖**，注解表达不了
      * （{@code @NotBlank} 无法写成「仅当 deliveryMode=1 时必填」），故在此显式校验。</p>
      *
-     * <p>「无需物流却传了单号」选择**报错而非静默丢弃**：本项目一贯避免静默吞错，
+     * <p>「自提却传了单号」选择**报错而非静默丢弃**：本项目一贯避免静默吞错，
      * 静默丢弃会掩盖前端的 bug，也会让库里出现语义矛盾的数据。</p>
+     *
+     * @param deliveryMode 订单的履约方式（1 快递 / 2 到店自提）
+     * @param dto          发货参数
      */
-    private void validateShipDTO(ShipDTO dto) {
-        if (dto == null || dto.getDeliveryMode() == null) {
-            throw new BizException("请选择发货方式");
+    private void validateShip(int deliveryMode, ShipDTO dto) {
+        if (dto == null) {
+            throw new BizException("请填写发货信息");
         }
         boolean hasCompany = StringUtils.hasText(dto.getShippingCompany());
         boolean hasTracking = StringUtils.hasText(dto.getTrackingNo());
-        if (dto.getDeliveryMode() == DELIVERY_EXPRESS) {
+        if (deliveryMode == DELIVERY_EXPRESS) {
             if (!hasCompany) {
                 throw new BizException("快递发货请填写快递公司");
             }
             if (!hasTracking) {
                 throw new BizException("快递发货请填写运单号");
             }
-        } else if (dto.getDeliveryMode() == DELIVERY_NO_LOGISTICS) {
+        } else if (deliveryMode == DELIVERY_PICKUP) {
             if (hasCompany || hasTracking) {
-                throw new BizException("无需物流的发货方式不应填写快递公司与运单号");
+                throw new BizException("到店自提的订单无需填写快递公司与运单号");
             }
-        } else {
-            throw new BizException("发货方式不合法");
         }
     }
 
@@ -801,6 +886,9 @@ public class OrderServiceImpl implements OrderService {
             vo.setReceiverFullAddress(String.join(" ",
                     nullToEmpty(order.getReceiverRegion()), nullToEmpty(order.getReceiverDetail())).trim());
         }
+        vo.setPickupShopName(order.getPickupShopName());
+        vo.setPickupAddress(order.getPickupAddress());
+        vo.setPickupPhone(order.getPickupPhone());
         vo.setCompleteTime(order.getCompleteTime());
         vo.setCancelTime(order.getCancelTime());
         vo.setCreateTime(order.getCreateTime());

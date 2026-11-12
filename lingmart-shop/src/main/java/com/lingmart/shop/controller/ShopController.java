@@ -6,6 +6,7 @@ import com.lingmart.common.result.R;
 import com.lingmart.shop.dto.ApplyShopDTO;
 import com.lingmart.shop.service.ShopService;
 import com.lingmart.shop.vo.ApplicationVO;
+import com.lingmart.shop.vo.ShopFulfillmentVO;
 import com.lingmart.shop.vo.ShopStorefrontVO;
 import com.lingmart.shop.vo.ShopVO;
 import jakarta.validation.Valid;
@@ -78,6 +79,17 @@ public class ShopController {
     @GetMapping("/storefront/{shopId}")
     public R<ShopStorefrontVO> storefront(@PathVariable Long shopId) {
         return R.ok(shopService.getStorefront(shopId));
+    }
+
+    /**
+     * 店铺履约能力（公开）：结算页据此决定能否选快递、自提去哪儿取。
+     *
+     * <p>独立于店铺主页，是为了避免结算页为了拿「能不能快递」而把整页商品一起拉下来。
+     * 店铺不存在/未营业时 data 为 null，前端据此拦截下单。</p>
+     */
+    @GetMapping("/{shopId}/fulfillment")
+    public R<ShopFulfillmentVO> fulfillment(@PathVariable Long shopId) {
+        return R.ok(shopService.getFulfillment(shopId));
     }
 
     /**

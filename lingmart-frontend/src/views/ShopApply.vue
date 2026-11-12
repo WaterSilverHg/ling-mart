@@ -21,6 +21,17 @@
       <el-form-item label="店铺描述">
         <el-input v-model="form.description" type="textarea" :rows="2" maxlength="255" placeholder="主营方向 / 特色" />
       </el-form-item>
+      <!-- 履约配置：自营实体店以到店自提为主，地址是买家取货点 -->
+      <el-form-item label="门店地址">
+        <el-input v-model="form.address" maxlength="255" placeholder="买家到店自提的地址，如：杭州市西湖区文一西路 1 号" />
+      </el-form-item>
+      <el-form-item label="门店电话">
+        <el-input v-model="form.contactPhone" maxlength="20" placeholder="手机号或带区号固话（买家取货/售后联系用）" />
+      </el-form-item>
+      <el-form-item label="支持快递">
+        <el-switch v-model="form.supportExpress" />
+        <span class="hint">关闭时仅支持到店自提（大多数实体店的默认选择）</span>
+      </el-form-item>
 
       <el-divider content-position="left">要卖的东西（申请审核通过后才可销售，至少 1 个完整商品）</el-divider>
       <div v-for="(p, i) in form.products" :key="i" class="p-card">
@@ -62,6 +73,10 @@ const form = ref({
   shopName: '',
   description: '',
   shopLogo: [],   // 单张 logo（上传组件返回数组，取第一张）
+  // 履约配置：自提是默认方式，快递由店主决定是否开启
+  address: '',
+  contactPhone: '',
+  supportExpress: false,
   products: [newProduct()]
 })
 
@@ -163,6 +178,14 @@ async function submit() {
     ElMessage.warning('请填写店铺名称')
     return
   }
+  if (!form.value.address) {
+    ElMessage.warning('请填写门店地址（买家自提时要按这个地址取货）')
+    return
+  }
+  if (!form.value.contactPhone) {
+    ElMessage.warning('请填写门店电话')
+    return
+  }
   const validProducts = form.value.products.filter(isValidProduct).map(toSpuDTO)
   if (validProducts.length === 0) {
     ElMessage.warning('请至少填写一个完整商品（标题 + 规格名 + 价格）')
@@ -174,6 +197,9 @@ async function submit() {
       shopName: form.value.shopName,
       shopLogo: form.value.shopLogo?.[0] || null,
       description: form.value.description,
+      address: form.value.address,
+      contactPhone: form.value.contactPhone,
+      supportExpress: form.value.supportExpress,
       products: validProducts
     })
     ElMessage.success('申请已提交，等待管理员审核')
@@ -190,6 +216,7 @@ onMounted(load)
 
 <style scoped>
 .prefill-alert { margin-bottom: 16px; }
+.hint { color: #909399; font-size: 12px; margin-left: 10px; }
 .p-card { border: 1px solid #ebeef5; border-radius: 6px; padding: 12px; margin-bottom: 12px; background: #fafafa; }
 .p-head { display: flex; justify-content: space-between; margin-bottom: 8px; }
 </style>

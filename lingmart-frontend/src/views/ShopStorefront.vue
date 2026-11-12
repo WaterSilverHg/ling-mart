@@ -5,6 +5,12 @@
       <div class="info">
         <h2 class="name">{{ store.shopName }}</h2>
         <p class="desc">{{ store.description || '这家店还没有填写简介' }}</p>
+        <!-- 履约方式：自营实体店以到店自提为主，地址是自提点 -->
+        <div class="fulfill">
+          <el-tag size="small" type="success">到店自提</el-tag>
+          <el-tag v-if="store.supportExpress === 1" size="small" type="primary">支持快递</el-tag>
+          <span v-if="store.address" class="addr">自提点：{{ store.address }}</span>
+        </div>
         <div class="owner">
           <el-avatar :size="24" :src="store.owner?.avatar || undefined" />
           <span>{{ store.owner?.nickname || '' }}</span>
@@ -76,6 +82,8 @@ onMounted(load)
 .info { flex: 1; }
 .name { margin: 0 0 6px; font-size: 20px; }
 .desc { color: #909399; font-size: 13px; margin: 0 0 8px; }
+.fulfill { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.fulfill .addr { color: #606266; font-size: 12px; }
 .owner { display: flex; align-items: center; gap: 6px; color: #606266; font-size: 13px; }
 .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
 .goods { background: #fff; border: 1px solid #ebeef5; border-radius: 8px; overflow: hidden; cursor: pointer; transition: all .2s; }

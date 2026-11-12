@@ -21,6 +21,10 @@ CREATE TABLE `shop`
     `shop_name`     VARCHAR(50)  NOT NULL COMMENT '店铺名称（唯一）',
     `shop_logo`     VARCHAR(255) DEFAULT NULL COMMENT '店铺logo地址',
     `description`   VARCHAR(255) DEFAULT NULL COMMENT '店铺描述',
+    -- 自营实体店以「到店自提」为默认履约方式；是否提供快递由店主自行决定
+    `support_express` TINYINT    NOT NULL DEFAULT 0 COMMENT '是否支持快递发货：1支持 0仅到店自提',
+    `address`       VARCHAR(255) DEFAULT NULL COMMENT '门店地址（买家自提点）',
+    `contact_phone` VARCHAR(20)  DEFAULT NULL COMMENT '门店联系电话（自提/售后联系用）',
     `status`        TINYINT      NOT NULL DEFAULT 0 COMMENT '营业状态：0未启用 1营业中 2已禁用',
     `review_status` TINYINT      NOT NULL DEFAULT 0 COMMENT '审核状态：0待审核 1已通过 2已拒绝 3待重审(描述变更)',
     `draft_content` TEXT         COMMENT '待审核的新店铺信息草稿(JSON)，宽松重审：旧信息先营业，通过后才生效',

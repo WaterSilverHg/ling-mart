@@ -71,10 +71,14 @@ public class Order {
     private LocalDateTime shipTime;
 
     /**
-     * 发货方式：1 快递 / 2 无需物流（自提、面交）。
+     * 履约方式：1 快递 / 2 到店自提。
      *
-     * <p>null 表示尚未发货；本次升级（v0.27）之前已发货的存量订单也是 null，
-     * 前端对这种情况回退显示「已发货」。</p>
+     * <p>v0.40 起由买家**在下单时选择**，并在订单生命周期内不可更改；卖家发货只是
+     * 「填快递信息」或「标记备货完成」，不再决定方式。能否选快递由店铺的
+     * {@code support_express} 决定（自提始终可选）。</p>
+     *
+     * <p>null 表示本次升级前创建的存量订单——它们没有记录过履约方式，
+     * 发货时按请求里的方式处理并补齐该字段。</p>
      */
     private Integer deliveryMode;
 
@@ -103,6 +107,15 @@ public class Order {
 
     /** 详细地址（下单快照） */
     private String receiverDetail;
+
+    /** 自提门店名称（下单快照，仅到店自提订单有值） */
+    private String pickupShopName;
+
+    /** 自提门店地址（下单快照） */
+    private String pickupAddress;
+
+    /** 自提门店电话（下单快照） */
+    private String pickupPhone;
 
     private LocalDateTime completeTime;
 

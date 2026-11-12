@@ -49,7 +49,9 @@ export const shopApi = {
   // 营业中店铺列表（首页公开浏览）
   shops: () => request.get('/shop/list'),
   // 店铺主页（公开浏览：店铺信息 + 店主公开信息 + 在售商品）
-  storefront: (shopId) => request.get(`/shop/storefront/${shopId}`)
+  storefront: (shopId) => request.get(`/shop/storefront/${shopId}`),
+  // 店铺履约能力（公开）：结算页判断能否选快递、自提去哪儿取
+  fulfillment: (shopId) => request.get(`/shop/${shopId}/fulfillment`)
 }
 
 // ============ 聊天（买家 ↔ 店铺老板，WebSocket 实时 + REST 历史）============

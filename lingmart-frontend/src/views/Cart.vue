@@ -85,6 +85,8 @@ function checkout() {
   const items = list.value.map(i => ({
     skuId: i.skuId,
     num: i.num,
+    // shopId 用于结算页查询店铺履约能力（能不能快递、自提地址在哪）
+    shopId: i.shopId,
     spuTitle: i.spuTitle,
     skuTitle: i.skuTitle,
     skuImage: i.skuImage,

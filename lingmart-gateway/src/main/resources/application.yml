@@ -207,10 +207,11 @@ lingmart:
     # 白名单（无需登录即可访问的路径，逗号分隔，Ant 风格）：
     # 注册 / 登录 / 验证码为公开接口；/v3/api-docs 与 /api/{svc}/v3/api-docs 为 OpenAPI 文档放行；
     # /uploads/** 为上传图片静态资源；/api/shop/storefront/** 店铺主页、/api/shop/list 店铺列表（首页以店铺为入口）；
+    # /api/shop/*/fulfillment 店铺履约能力（结算页判断能否选快递、自提去哪儿取，游客也应能看到）；
     # /api/search/** 为商品检索（无需登录也能逛）；
     # /ws/** 为聊天 WebSocket 握手（HTTP 握手阶段放行；业务鉴权 token 经 STOMP CONNECT 头携带，
     # 由 lingmart-chat 的 JwtChannelInterceptor 校验，网关不校验 STOMP 帧）；/actuator/health 供健康检查
-    whitelist: /api/auth/register,/api/auth/login,/api/auth/code/send,/api/auth/v3/api-docs,/api/shop/v3/api-docs,/api/product/v3/api-docs,/api/ware/v3/api-docs,/api/order/v3/api-docs,/api/search/v3/api-docs,/api/chat/v3/api-docs,/api/agent/v3/api-docs,/api/shop/storefront/**,/api/shop/list,/api/search/**,/uploads/**,/ws/**,/v3/api-docs,/v3/api-docs/**,/swagger-ui.html,/swagger-ui/**,/webjars/**,/actuator/health
+    whitelist: /api/auth/register,/api/auth/login,/api/auth/code/send,/api/auth/v3/api-docs,/api/shop/v3/api-docs,/api/product/v3/api-docs,/api/ware/v3/api-docs,/api/order/v3/api-docs,/api/search/v3/api-docs,/api/chat/v3/api-docs,/api/agent/v3/api-docs,/api/shop/storefront/**,/api/shop/list,/api/shop/*/fulfillment,/api/search/**,/uploads/**,/ws/**,/v3/api-docs,/v3/api-docs/**,/swagger-ui.html,/swagger-ui/**,/webjars/**,/actuator/health
     # 网关路由级限流阈值（QPS，Sentinel GatewayFlowRule 使用，可用环境变量覆盖）
     sentinel:
       auth-route-qps: ${SENTINEL_AUTH_QPS:200}       # 认证中心（登录/注册，含验证码限流兜底）

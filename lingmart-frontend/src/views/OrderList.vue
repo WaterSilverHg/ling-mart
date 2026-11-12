@@ -16,8 +16,13 @@
         <span class="price">¥{{ item.price }}</span>
       </div>
       <div class="foot">
-        <!-- 收货信息：下单快照。v0.39 之前的存量订单没有该字段，这里不渲染 -->
-        <div v-if="o.receiverName" class="receiver">
+        <!-- 自提订单：展示去哪儿取货（下单快照） -->
+        <div v-if="o.pickupAddress" class="receiver">
+          自提：{{ o.pickupShopName }} · {{ o.pickupAddress }}
+          <span v-if="o.pickupPhone" class="contact">（门店电话 {{ o.pickupPhone }}）</span>
+        </div>
+        <!-- 快递订单：收货信息为下单快照。v0.39 之前的存量订单没有该字段，这里不渲染 -->
+        <div v-else-if="o.receiverName" class="receiver">
           收货：{{ o.receiverName }} {{ o.receiverPhone }} · {{ o.receiverFullAddress }}
         </div>
         <span class="amount">合计：<b class="price">¥{{ o.totalAmount }}</b></span>
@@ -26,7 +31,7 @@
           <template v-if="o.deliveryMode === 1">
             物流：{{ o.shippingCompany }} <span class="tracking">{{ o.trackingNo }}</span>
           </template>
-          <template v-else-if="o.deliveryMode === 2">无需物流（自提 / 面交）</template>
+          <template v-else-if="o.deliveryMode === 2">已备货，可到店取货</template>
           <!-- 兼容本次升级前已发货的存量订单：那时还没有发货方式字段 -->
           <template v-else>已发货</template>
         </div>
@@ -39,7 +44,10 @@
         <div class="ops">
           <el-button v-if="o.orderStatus === 0" size="small" type="danger" @click="pay(o)">立即支付</el-button>
           <el-button v-if="o.orderStatus === 0" size="small" @click="cancel(o)">取消订单</el-button>
-          <el-button v-if="o.orderStatus === 2" size="small" type="success" @click="confirm(o)">确认收货</el-button>
+          <!-- 自提订单的「确认收货」实际是「确认已取货」，文案按履约方式区分 -->
+          <el-button v-if="o.orderStatus === 2" size="small" type="success" @click="confirm(o)">
+            {{ o.deliveryMode === 2 ? '确认已取货' : '确认收货' }}
+          </el-button>
           <el-button v-if="canRefund(o)" size="small" @click="requestRefund(o)">申请退款</el-button>
         </div>
       </div>
@@ -70,6 +78,8 @@ function statusType(s) { return STATUS[s]?.[1] || 'info' }
 function tagText(o) {
   if (o.refundStatus === 1) return '退款处理中'
   if (o.refundStatus === 2 || o.orderStatus === 5) return '已退款'
+  // 履约方式不同，状态 2 对买家的含义也不同：快递是「已发货」，自提是「待自提」
+  if (o.orderStatus === 2 && o.deliveryMode === 2) return '待自提'
   return statusText(o.orderStatus)
 }
 function tagType(o) {
@@ -153,6 +163,7 @@ onMounted(load)
 .time { color: #909399; font-size: 12px; }
 .refund-info { color: #e6a23c; font-size: 12px; flex: 1; }
 .receiver { color: #909399; font-size: 12px; flex: 1; }
+.receiver .contact { color: #c0c4cc; }
 .ship-info { color: #909399; font-size: 12px; flex: 1; }
 .ship-info .tracking { color: #409eff; font-family: Consolas, Menlo, monospace; }
 .pager { margin-top: 16px; display: flex; justify-content: center; }

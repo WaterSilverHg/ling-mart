@@ -355,14 +355,20 @@ sequenceDiagram
 
     rect rgb(235, 245, 255)
     Note over B,W: 阶段一：下单（Seata 全局事务 createOrder）
-    B->>GW: POST /api/order（Idempotency-Key，可选 addressId）
+    B->>GW: POST /api/order（Idempotency-Key，deliveryMode，快递时带 addressId）
     GW->>O: 转发（X-User-Id）
     O->>O: 幂等预查 (idempotencyKey, buyerId)
-    O->>DB: 解析收货地址（指定 → 默认 → 最近新增；无则拒单）
+    O->>S: Feign getShopById（取 supportExpress / 门店地址）
+    alt 到店自提（默认）
+        O->>O: 校验店铺已配置自提地址（无则拒单）
+    else 快递
+        O->>O: 校验店铺 support_express=1（否则拒单）
+        O->>DB: 解析收货地址（指定 → 默认 → 最近新增；无则拒单）
+    end
     O->>P: Feign getSkuInfo 逐条取服务端快照
     P-->>O: SKU 价格/标题（非上架或非通过则拒买）
     O->>O: 校验单店铺订单 + 禁自买
-    O->>DB: 插 order（待支付 + receiver_* 收货快照）+ order_item
+    O->>DB: 插 order（待支付 + delivery_mode + receiver_*/pickup_* 履约快照）+ order_item
     O->>W: Feign lockStock（CAS: stock-locked_stock>=num）
     W->>DB: ware_sku.locked_stock += num<br/>+ ware_order_task(0 已锁定)
     W-->>O: 全部成功（任一不足则抛异常 → 全局回滚）
@@ -422,6 +428,9 @@ stateDiagram-v2
     note right of 待支付
         order_status: 0待支付 1已支付 2已发货 3已完成 4已取消 5已退款
         退款单独有 refund_status: 0无 1退款中 2已退款 3拒绝
+        状态 2 的展示名随履约方式变化（v0.40）：
+          delivery_mode=1 快递 → 「已发货」
+          delivery_mode=2 自提 → 「待自提」
     end note
 ```
 

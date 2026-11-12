@@ -149,8 +149,7 @@ BEGIN
       FROM `_seed_seq` s WHERE s.`n` <= 20;
 
     -- ---------- 2.1 收货地址（每位买家一条默认地址） ----------
-    -- v0.39 起下单必须有收货地址：不给压测买家播种地址，order 场景会全部失败在「请先添加收货地址」。
-    -- 地址快照落在 order 表，与这张表没有外键关系，压测后 teardown 直接删不影响历史订单。
+    -- 仅快递订单需要收货地址；压测默认走「到店自提」，这条地址是为覆盖快递链路留的（可选用例）。
     INSERT INTO `lingmart_order`.`user_address`
         (`id`, `user_id`, `receiver_name`, `receiver_phone`, `province`, `city`, `district`,
          `detail_address`, `is_default`)
@@ -160,10 +159,15 @@ BEGIN
       FROM `_seed_seq` s WHERE s.`n` <= 20;
 
     -- ---------- 3. 店铺（店主 = 上面的卖家，直接置营业中 + 审核通过） ----------
+    -- v0.40 起自提是默认履约方式：必须给每店一个门店地址，否则下单会失败在「尚未配置自提地址」。
+    -- support_express 保持默认 0（仅自提），与自营实体店的典型配置一致。
     INSERT INTO `lingmart_shop`.`shop`
-        (`id`, `user_id`, `shop_name`, `shop_logo`, `description`, `status`, `review_status`)
+        (`id`, `user_id`, `shop_name`, `shop_logo`, `description`,
+         `address`, `contact_phone`, `status`, `review_status`)
     SELECT 9300000 + s.`n`, 9200000 + s.`n`, CONCAT('压测店铺', LPAD(s.`n`, 2, '0')),
-           im.`url`, '压测数据，可安全删除（见 seed-loadtest.sql）', 1, 1
+           im.`url`, '压测数据，可安全删除（见 seed-loadtest.sql）',
+           CONCAT('杭州市西湖区压测路 ', s.`n`, ' 号'), CONCAT('0571-8888', LPAD(s.`n`, 4, '0')),
+           1, 1
       FROM `_seed_seq` s
       JOIN `_seed_img` im ON im.`idx` = 1 + ((s.`n` - 1) MOD 10)
      WHERE s.`n` <= 20;

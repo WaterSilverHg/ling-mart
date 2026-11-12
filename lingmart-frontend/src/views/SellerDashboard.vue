@@ -8,6 +8,17 @@
           <el-form-item label="店铺名称"><el-input v-model="shop.shopName" /></el-form-item>
           <el-form-item label="店铺 logo"><ImageUploader v-model="shopLogoList" :limit="1" /></el-form-item>
           <el-form-item label="店铺描述"><el-input v-model="shop.description" type="textarea" :rows="2" /></el-form-item>
+          <!-- 履约配置：自提地址是买家取货点；快递开关决定买家结算时能否选快递 -->
+          <el-form-item label="门店地址">
+            <el-input v-model="shop.address" maxlength="255" placeholder="买家到店自提的地址" />
+          </el-form-item>
+          <el-form-item label="门店电话">
+            <el-input v-model="shop.contactPhone" maxlength="20" placeholder="手机号或带区号固话" />
+          </el-form-item>
+          <el-form-item label="支持快递">
+            <el-switch v-model="shop.supportExpress" :active-value="1" :inactive-value="0" />
+            <span class="hint">关闭时买家只能选择「到店自提」</span>
+          </el-form-item>
           <el-form-item label="营业状态">
             <el-tag :type="shop.status === 1 ? 'success' : 'warning'">{{ shop.status === 1 ? '营业中' : '未启用' }}</el-tag>
             <el-tag style="margin-left: 8px" :type="reviewType(shop.reviewStatus)">{{ reviewText(shop.reviewStatus) }}</el-tag>
@@ -169,19 +180,27 @@
       </template>
     </el-dialog>
 
-    <!-- 发货（v0.27）：必须选择发货方式；选「快递发货」才需要公司与运单号 -->
-    <el-dialog v-model="shipVisible" title="发货" width="460px">
+    <!-- 发货：履约方式由买家下单时确定，卖家只负责「填快递单」或「标记备货完成」 -->
+    <el-dialog v-model="shipVisible" :title="shipForm.deliveryMode === 2 ? '确认备货完成' : '发货'" width="460px">
       <el-form label-width="90px">
         <el-form-item label="订单号">
           <span class="ship-sn">{{ shipForm.orderSn }}</span>
         </el-form-item>
-        <el-form-item label="发货方式">
-          <el-radio-group v-model="shipForm.deliveryMode">
-            <el-radio :value="1">快递发货</el-radio>
-            <el-radio :value="2">无需物流（自提 / 面交）</el-radio>
-          </el-radio-group>
+        <el-form-item label="履约方式">
+          <el-tag :type="shipForm.deliveryMode === 2 ? 'success' : 'primary'">
+            {{ shipForm.deliveryMode === 2 ? '到店自提' : '快递配送' }}
+          </el-tag>
         </el-form-item>
-        <template v-if="shipForm.deliveryMode === 1">
+        <template v-if="shipForm.deliveryMode === 2">
+          <el-form-item label="取货信息">
+            <div class="pickup-tip">
+              <div v-if="shipForm.pickupAddress">{{ shipForm.pickupAddress }}</div>
+              <div v-if="shipForm.pickupPhone" class="pickup-phone">门店电话：{{ shipForm.pickupPhone }}</div>
+              <div class="hint">确认后订单变为「待自提」，买家会看到取货地址与电话</div>
+            </div>
+          </el-form-item>
+        </template>
+        <template v-else>
           <el-form-item label="快递公司">
             <el-input v-model="shipForm.shippingCompany" maxlength="50" placeholder="如：顺丰速运" />
           </el-form-item>
@@ -192,7 +211,9 @@
       </el-form>
       <template #footer>
         <el-button @click="shipVisible = false">取消</el-button>
-        <el-button type="primary" :loading="shipSaving" @click="submitShip">确认发货</el-button>
+        <el-button type="primary" :loading="shipSaving" @click="submitShip">
+          {{ shipForm.deliveryMode === 2 ? '确认备货完成' : '确认发货' }}
+        </el-button>
       </template>
     </el-dialog>
   </div>
@@ -252,6 +273,9 @@ async function updateShop() {
   await shopApi.updateShop({
     shopName: shop.value.shopName,
     shopLogo: shopLogoList.value?.[0] || null,
+    address: shop.value.address,
+    contactPhone: shop.value.contactPhone,
+    supportExpress: shop.value.supportExpress === 1,
     description: shop.value.description
   })
   ElMessage.success('已提交修改，等待重新审核；审核通过前继续按旧信息营业')
@@ -404,15 +428,25 @@ function onSellerOrdersPage(p) {
   loadOrders()
 }
 
-// ============ 发货（v0.27：需选择发货方式） ============
+// ============ 发货（履约方式由买家下单时确定，卖家只填快递信息或标记备货完成） ============
 const shipVisible = ref(false)
 const shipSaving = ref(false)
-// deliveryMode：1 快递 / 2 无需物流（与后端 Order 的 delivery_mode 取值一致）
-const shipForm = ref({ orderSn: '', deliveryMode: 1, shippingCompany: '', trackingNo: '' })
+// deliveryMode：1 快递 / 2 到店自提（与后端 Order 的 delivery_mode 取值一致）。
+// 存量订单没有该字段（null），按快递处理，与本次升级前的行为一致
+const shipForm = ref({
+  orderSn: '', deliveryMode: 1, shippingCompany: '', trackingNo: '', pickupAddress: '', pickupPhone: ''
+})
 
 function openShip(o) {
   // 每次打开都重置，避免上一条订单的公司/单号残留到这一条
-  shipForm.value = { orderSn: o.orderSn, deliveryMode: 1, shippingCompany: '', trackingNo: '' }
+  shipForm.value = {
+    orderSn: o.orderSn,
+    deliveryMode: o.deliveryMode === 2 ? 2 : 1,
+    shippingCompany: '',
+    trackingNo: '',
+    pickupAddress: o.pickupAddress || '',
+    pickupPhone: o.pickupPhone || ''
+  }
   shipVisible.value = true
 }
 
@@ -426,12 +460,13 @@ async function submitShip() {
   shipSaving.value = true
   try {
     await orderApi.ship(f.orderSn, {
+      // 正常订单不必再传 deliveryMode（后端以订单上的为准）；存量订单仍需要它
       deliveryMode: f.deliveryMode,
-      // 无需物流时后端要求两者为空，这里显式传 null
+      // 自提订单后端要求两者为空，这里显式传 null
       shippingCompany: isExpress ? f.shippingCompany.trim() : null,
       trackingNo: isExpress ? f.trackingNo.trim() : null
     })
-    ElMessage.success('已发货')
+    ElMessage.success(isExpress ? '已发货' : '已标记备货完成，等待买家到店取货')
     shipVisible.value = false
     loadOrders()
   } finally {
@@ -567,6 +602,10 @@ onBeforeUnmount(disposeCharts)
 .stock-infinite { color: #909399; }
 .stock-tip { color: #909399; font-size: 12px; margin-bottom: 8px; }
 .ship-sn { color: #606266; font-family: Consolas, Menlo, monospace; }
+.hint { color: #909399; font-size: 12px; margin-left: 10px; }
+.pickup-tip { line-height: 1.7; }
+.pickup-phone { color: #909399; font-size: 12px; }
+.pickup-tip .hint { color: #909399; font-size: 12px; }
 .order-row { display: flex; align-items: center; gap: 16px; background: #fafafa; padding: 12px 16px; border-radius: 6px; margin-bottom: 10px; }
 .o-info { flex: 1; }
 .o-sn { font-size: 12px; color: #909399; }

@@ -26,6 +26,12 @@ public class ShopStorefrontVO {
     /** 店铺描述 */
     private String description;
 
+    /** 是否支持快递发货：1 支持 / 0 仅到店自提（到店自提始终可用） */
+    private Integer supportExpress;
+
+    /** 门店地址（自提点）；未配置时为 null */
+    private String address;
+
     /** 店主公开信息（头像/昵称，手机号不外发） */
     private OwnerInfo owner;
 

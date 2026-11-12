@@ -6,6 +6,7 @@ import com.lingmart.shop.dto.ApplyShopDTO;
 import com.lingmart.shop.dto.ReviewApplicationDTO;
 import com.lingmart.shop.entity.AuditLog;
 import com.lingmart.shop.vo.ApplicationVO;
+import com.lingmart.shop.vo.ShopFulfillmentVO;
 import com.lingmart.shop.vo.ShopStorefrontVO;
 import com.lingmart.shop.vo.ShopVO;
 
@@ -133,6 +134,14 @@ public interface ShopService {
      * @return 店铺主页信息；店铺不存在或未营业时抛业务异常
      */
     ShopStorefrontVO getStorefront(Long shopId);
+
+    /**
+     * 查询店铺的履约能力（结算页用）：是否支持快递、自提门店地址与电话。
+     *
+     * @param shopId 店铺 ID
+     * @return 履约能力视图；店铺未营业时返回 {@code null}（结算页据此提示不可下单）
+     */
+    ShopFulfillmentVO getFulfillment(Long shopId);
 
     /**
      * 营业中（审核已通过）店铺列表：首页公开浏览用。

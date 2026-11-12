@@ -14,4 +14,13 @@ public interface ShopFeignClient {
 
     @GetMapping("/internal/shop/by-user/{userId}")
     R<ShopInfo> getShopByUserId(@PathVariable("userId") Long userId);
+
+    /**
+     * 按店铺 ID 查店铺（下单时校验履约能力并快照自提门店信息）。
+     *
+     * @param shopId 店铺 ID
+     * @return 店铺信息；不存在时 data 为 null
+     */
+    @GetMapping("/internal/shop/{shopId}")
+    R<ShopInfo> getShopById(@PathVariable("shopId") Long shopId);
 }

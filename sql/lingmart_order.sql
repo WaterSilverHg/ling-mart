@@ -36,7 +36,9 @@ CREATE TABLE `order`
     `buyer_remark`  VARCHAR(255)   DEFAULT NULL COMMENT '买家备注',
     `pay_time`      DATETIME       DEFAULT NULL COMMENT '支付时间',
     `ship_time`     DATETIME       DEFAULT NULL COMMENT '发货时间',
-    `delivery_mode` TINYINT        DEFAULT NULL COMMENT '发货方式：1快递 2无需物流',
+    -- v0.40 起改为「下单时由买家选择的履约方式」：1 快递 / 2 到店自提。
+    -- 下单后不可更改；卖家发货动作只填快递信息或标记「备货完成」，不再由卖家决定方式。
+    `delivery_mode` TINYINT        DEFAULT NULL COMMENT '履约方式：1快递 2到店自提（下单时确定；NULL=本次升级前的存量订单）',
     `shipping_company` VARCHAR(50) DEFAULT NULL COMMENT '快递公司（仅 delivery_mode=1 时有值）',
     `tracking_no`   VARCHAR(64)    DEFAULT NULL COMMENT '运单号（仅 delivery_mode=1 时有值）',
     -- 收货信息是**下单时快照**，不是外键引用：买家事后改地址簿或删地址，已生成的订单不受影响
@@ -45,6 +47,10 @@ CREATE TABLE `order`
     `receiver_phone` VARCHAR(20)   DEFAULT NULL COMMENT '收货人手机号（下单快照）',
     `receiver_region` VARCHAR(120) DEFAULT NULL COMMENT '省市区（下单快照，如 浙江省 杭州市 西湖区）',
     `receiver_detail` VARCHAR(255) DEFAULT NULL COMMENT '详细地址（下单快照）',
+    -- 自提订单不需要收货地址，改为快照「去哪儿取货」。与 receiver_* 同为下单快照，不随店铺信息变动
+    `pickup_shop_name` VARCHAR(50)  DEFAULT NULL COMMENT '自提门店名称（下单快照）',
+    `pickup_address`   VARCHAR(255) DEFAULT NULL COMMENT '自提门店地址（下单快照）',
+    `pickup_phone`     VARCHAR(20)  DEFAULT NULL COMMENT '自提门店电话（下单快照）',
     `complete_time` DATETIME       DEFAULT NULL COMMENT '完成时间',
     `cancel_time`   DATETIME       DEFAULT NULL COMMENT '取消时间',
     `idempotency_key` VARCHAR(64)  DEFAULT NULL COMMENT '幂等键（客户端 Idempotency-Key 头，防重复下单）',

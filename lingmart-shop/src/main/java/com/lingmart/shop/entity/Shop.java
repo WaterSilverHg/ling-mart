@@ -34,6 +34,21 @@ public class Shop {
     /** 店铺描述 */
     private String description;
 
+    /**
+     * 是否支持快递发货：1 支持 / 0 仅到店自提。
+     *
+     * <p>项目定位是自营实体店，**到店自提是默认且始终可用**的履约方式；
+     * 快递属于店铺可选能力，由店主在「我的店铺」里开关。买家下单时只能在
+     * 店铺支持的方式中选择。</p>
+     */
+    private Integer supportExpress;
+
+    /** 门店地址（买家自提点） */
+    private String address;
+
+    /** 门店联系电话（自提/售后联系用） */
+    private String contactPhone;
+
     /** 营业状态：0 未启用，1 营业中，2 已禁用 */
     private Integer status;
 

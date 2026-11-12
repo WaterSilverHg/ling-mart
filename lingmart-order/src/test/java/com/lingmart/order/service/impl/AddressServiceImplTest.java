@@ -1,13 +1,11 @@
 package com.lingmart.order.service.impl;
 
-import com.baomidou.mybatisplus.core.MybatisConfiguration;
-import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.lingmart.common.exception.BizException;
 import com.lingmart.order.dto.AddressDTO;
 import com.lingmart.order.entity.UserAddress;
 import com.lingmart.order.mapper.UserAddressMapper;
+import com.lingmart.order.support.MybatisLambdaCache;
 import com.lingmart.order.vo.AddressVO;
-import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -44,14 +42,13 @@ class AddressServiceImplTest {
     /**
      * 手工初始化 MyBatis-Plus 的 Lambda 缓存（{@code SFunction} → 列名）。
      *
-     * <p>正常运行时由 {@link TableInfoHelper} 在实体随 Mapper 被扫描时填充；本测试是纯 Mockito、
-     * 没有 Spring/MyBatis 上下文，不初始化的话 {@code LambdaUpdateWrapper#set} 在构造 SQL 片段时
-     * 会抛 {@code can not find lambda cache for this entity}。生产代码不受影响。</p>
+     * <p>本测试是纯 Mockito、没有 Spring/MyBatis 上下文，不初始化的话
+     * {@code LambdaUpdateWrapper#set} 在构造 SQL 片段时会抛
+     * {@code can not find lambda cache for this entity}。具体逻辑见 {@link MybatisLambdaCache}。</p>
      */
     @BeforeAll
     static void initMybatisPlusLambdaCache() {
-        TableInfoHelper.initTableInfo(
-                new MapperBuilderAssistant(new MybatisConfiguration(), ""), UserAddress.class);
+        MybatisLambdaCache.initOrderModule();
     }
 
     // ==================== 新增 ====================

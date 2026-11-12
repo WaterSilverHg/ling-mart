@@ -50,7 +50,7 @@ public class OrderDetailVO {
 
     private LocalDateTime shipTime;
 
-    /** 发货方式：1 快递 / 2 无需物流；null = 尚未发货（含 v0.27 之前已发货的存量订单） */
+    /** 履约方式：1 快递 / 2 到店自提（下单时确定）；null = v0.40 之前的存量订单 */
     private Integer deliveryMode;
 
     /** 快递公司（仅 deliveryMode=1 时有值） */
@@ -73,6 +73,15 @@ public class OrderDetailVO {
 
     /** 完整收货地址（省市区 + 详细地址，展示用；无收货信息时为 null） */
     private String receiverFullAddress;
+
+    /** 自提门店名称（下单快照，仅到店自提订单有值） */
+    private String pickupShopName;
+
+    /** 自提门店地址（下单快照） */
+    private String pickupAddress;
+
+    /** 自提门店电话（下单快照） */
+    private String pickupPhone;
 
     private LocalDateTime completeTime;
 

@@ -169,9 +169,10 @@ SHOW TABLES FROM lingmart_product LIKE 'sale_rollback_log';"
 | `2026-09-20-integrity-and-indexes.sql` | **三段式**：唯一键（`shop.uk_user_id`、`cart.uk_buyer_sku`）+ 5 条索引 + Outbox 注释。**先跑第一段自检** | v0.11 |
 | `2026-10-03-refund-and-shipping.sql` | `order` 表 4 列（`refund_apply_time`、`delivery_mode`、`shipping_company`、`tracking_no`）+ `idx_refund_apply` 索引 | v0.27 |
 | `2026-11-10-address-and-receiver.sql` | `user_address` 表（收货地址簿）+ `order` 表 5 列（`address_id`、`receiver_name`、`receiver_phone`、`receiver_region`、`receiver_detail`） | v0.39 |
+| `2026-11-11-pickup-and-express.sql` | `shop` 表 3 列（`support_express`、`address`、`contact_phone`）+ `order` 表 3 列（`pickup_shop_name`、`pickup_address`、`pickup_phone`）+ `delivery_mode` 注释更新 | v0.40 |
 | `scripts/migrate-v0506.sql` | 历史脚本：退款四列 + `spu.min_price` | v0.5 |
 
-**推荐：一键按序执行全部迁移**（覆盖 `sql/upgrade/` 下全部 8 个脚本 + `scripts/migrate-v0506.sql`；
+**推荐：一键按序执行全部迁移**（覆盖 `sql/upgrade/` 下全部 9 个脚本 + `scripts/migrate-v0506.sql`；
 「已存在」与「Duplicate column」类报错会被识别为跳过，可安全重复执行）
 ```bash
 bash scripts/migrate.sh          # Git Bash（需 docker 客户端能连上守护进程，脚本会先自查）
@@ -248,11 +249,11 @@ docker exec -i lingmart-mysql mysql -uroot -proot --default-character-set=utf8mb
 ### 4.4 下单 → 支付 → 发货 → 确认 → 退款
 1. 买家加购物车 → 结算下单 → 「我的订单」支付（模拟支付）。
    **重复支付回归**：对同一订单再点一次支付 → 应报「订单状态不允许支付」，且商品销量**只加一次**。
-2. **卖家发货（v0.27 起必须先选发货方式）**：
-   - 选「快递发货」但不填公司/单号 → 应报「快递发货请填写快递公司 / 运单号」，发不出去；
-   - 选「快递发货」填好 → 发货成功，**买家「我的订单」里能看到「物流：xx 公司 单号」**；
-   - 换一单选「无需物流（自提 / 面交）」→ 直接可提交，买家侧显示「无需物流（自提 / 面交）」。
-   - 然后买家确认收货。
+2. **卖家处理订单（v0.40 起履约方式由买家下单时确定，卖家不再选方式）**：
+   - **自提订单**（结算页选「到店自提」）→ 订单里显示门店地址/电话；卖家点「确认备货完成」→ 买家侧变「待自提」；
+   - **快递订单**（店铺需开启「支持快递」）→ 卖家点「发货」，不填公司/单号应报「快递发货请填写快递公司 / 运单号」；
+     填好后发货成功，**买家「我的订单」里能看到「物流：xx 公司 单号」**；
+   - 然后买家确认收货（自提订单按钮为「确认已取货」）。
 3. 买家申请退款 → 卖家审核通过 → 订单置「已退款」、库存回补、**销量回退（SPU/SKU 一并减回，ES `saleCount` 秒级刷新）**、不计入销售统计；对同一订单再点一次「通过」应报「该订单没有待审核的退款申请」且销量不再变化。
 4. **退款超时自动同意（v0.27）**：把 `lingmart.order.refund-auto-approve-ms` 临时设为 `60000`（1 分钟）后重启 order，
    买家申请退款后**什么都不做** → 等一轮扫描（默认 60s）→ 订单应自动变「已退款」，且库存回补、销量回退。
@@ -365,6 +366,21 @@ docker exec -i lingmart-mysql mysql -uroot -proot --default-character-set=utf8mb
 | 6 | 无地址拒绝下单 | 新注册账号（无地址）直接 `POST /api/order` 且不带 `addressId` | 返回「请先添加收货地址」，不生成订单 |
 | 7 | 自动确认收货 | `auto-confirm-days: 0` + 重启 order，造一笔已发货订单，等下一轮扫描（默认 1 小时，可把 `AUTO_CONFIRM_SCAN_MS=60000` 调小） | 订单状态 2 → 3，`complete_time` 被写入，日志出现「发货超时，系统自动确认收货」 |
 | 8 | 退款中不自动完成 | 已发货订单申请退款（`refund_status=1`）后触发扫描 | 订单状态保持 2，日志显示「退款流程进行中，跳过自动确认收货」 |
+
+### 4.10 自提优先的履约链路（v0.40，改订单/店铺履约相关代码后必做）
+
+前置：已执行 `sql/upgrade/2026-11-11-pickup-and-express.sql`。
+
+| # | 验证项 | 操作 | 预期 |
+| --- | --- | --- | --- |
+| 1 | 店铺必填自提信息 | 用卖家账号在「卖家中心 → 我的店铺」清空门店地址后提交 | 前端拦截；直接调接口则返回「门店地址不能为空」 |
+| 2 | 默认仅自提 | 新店（不打开「支持快递」）结算 | 结算页「快递配送」置灰并标注「该店铺不支持」 |
+| 3 | 自提下单 | 选「到店自提」提交 | 订单创建成功；**不要求收货地址**；订单详情里有 `pickupShopName/pickupAddress/pickupPhone` |
+| 4 | 自提门店快照 | 下单后修改店铺地址 → 再看该订单 | 订单里的自提地址仍是下单时的（快照未受影响） |
+| 5 | 快递需店铺开启 | 店铺未开快递时，直接发 `POST /api/order` 带 `deliveryMode:1` | 返回「该店铺不支持快递发货，请选择到店自提」 |
+| 6 | 卖家备货 | 卖家对自提订单点「确认备货完成」 | 订单状态 2；买家侧标签为「**待自提**」，按钮为「确认已取货」 |
+| 7 | 卖家不能改履约方式 | 对自提订单调 `POST /ship` 传 `deliveryMode:1` + 运单号 | 返回「该订单的履约方式为到店自提，不能更改」 |
+| 8 | 存量订单兼容 | 用升级前创建、尚未发货的订单发货（`delivery_mode` 为 NULL） | 按请求里的方式发货成功，并补齐 `delivery_mode` |
 
 ---
 

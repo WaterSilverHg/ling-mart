@@ -25,4 +25,13 @@ public class ShopInfo {
 
     /** 店铺状态：0 待审核，1 已启用，2 已禁用 */
     private Integer status;
+
+    /** 是否支持快递发货：1 支持 / 0 仅到店自提 */
+    private Integer supportExpress;
+
+    /** 门店地址（买家自提点） */
+    private String address;
+
+    /** 门店联系电话（自提/售后联系用） */
+    private String contactPhone;
 }

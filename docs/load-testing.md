@@ -73,14 +73,19 @@ bash scripts/load-test/seed/seed-loadtest.sh
 - **管理员本身不参与压测**：它是 `ROLE_ADMIN`，语义上只能管理、不能下单，
   所以买家另造了 20 个 `ROLE_USER`。管理员只在 `post-seed.mjs` 里用来调重建索引入口。
 
-### 3.2.1 收货地址（v0.39 起必须有）
+### 3.2.1 履约信息（v0.39 地址 / v0.40 自提）
 
-下单现在会解析收货地址：`addressId` 不传时取默认地址，一条都没有则**拒绝下单**
-（`请先添加收货地址`）。因此播种脚本已为 20 个买家各插一条默认地址，
+下单默认走**到店自提**（`deliveryMode` 不传即为 2），此时**不需要收货地址**，但**店铺必须有门店地址**——
+所以播种脚本给 20 个压测店铺都补了 `address` 与 `contact_phone`。若改成压测快递链路
+（`deliveryMode: 1`），还需要店铺开启 `support_express=1`，并且买家有收货地址（播种已准备）。
+
+不满足时下单会被明确拒绝（`该店铺尚未配置自提地址` / `该店铺不支持快递发货` / `请先添加收货地址`）。
+
 `order` 场景的请求体**不需要改**（沿用原协议即可）。
 
-> 若你用的是**升级前**的旧库且没跑 `sql/upgrade/2026-11-10-address-and-receiver.sql`，
-> 播种会因 `user_address` 表不存在而失败——请先执行迁移。
+> 若你用的是**升级前**的旧库且没跑 `sql/upgrade/2026-11-10-address-and-receiver.sql`
+> 与 `sql/upgrade/2026-11-11-pickup-and-express.sql`，播种会因 `user_address` 表 /
+> `shop.address` 列不存在而失败——请先执行迁移。
 
 ### 3.3 商品要能被搜到，必须进 ES
 

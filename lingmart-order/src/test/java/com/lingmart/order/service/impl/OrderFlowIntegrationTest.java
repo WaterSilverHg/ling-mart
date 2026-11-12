@@ -27,10 +27,8 @@ import com.lingmart.ware.mapper.StockFlowLogMapper;
 import com.lingmart.ware.mapper.WareOrderTaskMapper;
 import com.lingmart.ware.mapper.WareSkuMapper;
 import com.lingmart.ware.service.impl.WareServiceImpl;
-import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.AbstractWrapper;
-import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
-import org.apache.ibatis.builder.MapperBuilderAssistant;
+import com.lingmart.order.support.MybatisLambdaCache;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -118,15 +116,14 @@ class OrderFlowIntegrationTest {
     /**
      * 手工初始化 MyBatis-Plus 的 Lambda 缓存（{@code SFunction} → 列名）。
      *
-     * <p>正常运行时该缓存由 {@link TableInfoHelper} 在实体随 Mapper 被扫描时填充；本测试是纯 Mockito、
-     * 没有 Spring/MyBatis 上下文，不初始化的话内存 Mapper 桩里调用 {@code wrapper.getSqlSegment()}
-     * 会抛 {@code MybatisPlusException: can not find lambda cache for this entity}。
-     * 生产代码不受影响——它只在真正执行 SQL 时才解析 wrapper，那时缓存早已就绪。</p>
+     * <p>本测试是纯 Mockito、没有 Spring/MyBatis 上下文，不初始化的话内存 Mapper 桩里调用
+     * {@code wrapper.getSqlSegment()} 会抛 {@code can not find lambda cache}。
+     * 具体初始化逻辑见 {@link MybatisLambdaCache}——抽成公共类是为了让每个测试类各自独立，
+     * 不依赖「谁先跑」。</p>
      */
     @BeforeAll
     static void initMybatisPlusLambdaCache() {
-        TableInfoHelper.initTableInfo(
-                new MapperBuilderAssistant(new MybatisConfiguration(), ""), Order.class);
+        MybatisLambdaCache.initOrderModule();
     }
 
     @BeforeEach
@@ -137,6 +134,8 @@ class OrderFlowIntegrationTest {
         setupOrderMappers();
         // 下单要解析收货地址（v0.39）：地址簿不是本测试的关注点，固定返回一条地址即可
         when(addressService.resolveForCheckout(any(), any())).thenReturn(address());
+        // v0.40：下单要按店铺履约能力决定能否快递、并快照自提门店信息
+        when(shopFeignClient.getShopById(any())).thenReturn(R.ok(shop(1L)));
 
         orderService = new OrderServiceImpl(orderMapper, orderItemMapper, productFeignClient,
                 wareFeignClient, shopFeignClient, rabbitTemplate, orderPaidEventMapper, objectMapper,
@@ -492,6 +491,10 @@ class OrderFlowIntegrationTest {
         shop.setId(id);
         shop.setShopName("测试店铺");
         shop.setStatus(1);
+        // v0.40：默认到店自提，下单要能取到自提地址
+        shop.setAddress("杭州市西湖区文一西路 1 号");
+        shop.setContactPhone("0571-88888888");
+        shop.setSupportExpress(0);
         return shop;
     }
 

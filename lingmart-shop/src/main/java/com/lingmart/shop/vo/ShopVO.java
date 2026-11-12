@@ -20,6 +20,15 @@ public class ShopVO {
     /** 店铺描述 */
     private String description;
 
+    /** 是否支持快递发货：1 支持 / 0 仅到店自提 */
+    private Integer supportExpress;
+
+    /** 门店地址（自提点） */
+    private String address;
+
+    /** 门店联系电话 */
+    private String contactPhone;
+
     /** 营业状态：0 未启用，1 营业中，2 已禁用 */
     private Integer status;
 

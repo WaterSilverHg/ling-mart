@@ -79,16 +79,21 @@
 ### 2.5 下单与库存
 
 ```
-选收货地址（地址簿，快照进订单）
-  → 加购 / 直接下单 → POST /api/order（Seata 全局事务：建单 + 锁库存）
+选择履约方式（到店自提 / 快递）→ 加购 / 直接下单
+  → POST /api/order（Seata 全局事务：建单 + 锁库存）
   → 支付（订单置已付 + 销量累加 + 写 Outbox 事件，同本地事务）→ 异步扣减库存
-  → 卖家发货 → 买家确认收货（或发货 N 天后系统自动确认）→ 完成
+  → 卖家备货完成（自提）/ 填运单发货（快递）
+  → 买家取货/收货确认（或发货 N 天后系统自动确认）→ 完成
   ↘ 超时未支付 → RabbitMQ 延迟队列 + 定时扫描兜底 → 自动取消 + 解锁库存
 ```
 
-- **收货地址**：下单时把地址**快照**进订单表（`receiver_*` 四列），之后修改/删除地址簿不影响已生成的订单。
-  不传 `addressId` 时按「默认地址 → 最近新增」回退，一条地址都没有则拒绝下单。
-- **订单状态**：0 待支付 → 1 已支付 → 2 已发货 → 3 已完成（买家确认收货，或发货超过 `lingmart.order.auto-confirm-days` 天由系统确认）/ 4 已取消 / 5 已退款。
+- **履约方式**：项目面向自营实体店，**到店自提是默认方式且始终可选**；快递由店铺的 `support_express` 决定。
+  下单时确定（`deliveryMode`：1 快递 / 2 到店自提，不传默认 2），之后不可更改。
+- **收货地址**：仅快递订单需要，下单时把地址**快照**进订单（`receiver_*`）；
+  自提订单改为快照门店信息（`pickup_shop_name` / `pickup_address` / `pickup_phone`）。
+  两种快照都不随地址簿/店铺信息后续变动而改变。
+- **订单状态**：0 待支付 → 1 已支付 → 2 已发货（自提订单显示为「待自提」）→ 3 已完成
+  （买家确认，或发货超过 `lingmart.order.auto-confirm-days` 天由系统确认）/ 4 已取消 / 5 已退款。
 - **幂等**：`POST /api/order` 支持 `Idempotency-Key` 请求头，相同键只建一单（前端结算页自动携带）；
   数据库按 `(idempotency_key, buyer_id)` 联合唯一兜底（跨买家可安全复用客户端幂等键，防并发重复下单）。
 - **禁止自买**：下单时校验买家不得购买自己店铺的商品（防自买刷销量/信用）。
@@ -109,14 +114,14 @@ ware 的 `OrderPaidListener` 幂等扣减（同一 `(order_sn, sku)` 已扣过�
 
 ### 2.6 发货
 
-卖家发货时**必须选择发货模式**：
+履约方式在**下单时**已由买家确定，卖家发货时不再选择方式，只按订单类型走对应动作：
 
-| `deliveryMode` | 含义 | 附加要求 |
+| 订单履约方式 | 卖家动作 | 附加要求 |
 | --- | --- | --- |
-| 1 | 快递 | 必须填 `shippingCompany` + `trackingNo` |
-| 2 | 无需物流 | 两者**必须为空**，否则报错 |
+| 快递（`delivery_mode=1`） | 填运单发货 | 必须填 `shippingCompany` + `trackingNo` |
+| 到店自提（`delivery_mode=2`） | 标记「备货完成」 | 两者**必须为空**，否则报错 |
 
-物流信息在买家订单列表中展示。
+物流信息在买家订单列表中展示；自提订单展示门店名称、地址与门店电话。
 
 ### 2.7 退款与售后
 
@@ -477,6 +482,7 @@ docker compose -f docker-compose.yml -f docker-compose.business.yml up -d
 
 **shop（店铺表）**
 - `id`、`user_id`（店主，**唯一键 `uk_user_id`**：一个用户只能有一家店铺）、`shop_name`（唯一）、`shop_logo`、`description`
+- 履约：`support_express`（1 支持快递 / 0 **仅到店自提**，默认 0）、`address`（门店地址=自提点）、`contact_phone`（门店电话）
 - `status`（**营业状态**：0 未启用 / 1 营业中 / 2 已禁用）与 `review_status`（**审核状态**：0 待审核 / 1 已通过 / 2 已拒绝 / 3 待重审）是**两个独立字段**——没有"审核中"这种 `status` 取值
 - `draft_content`：待审核的新店铺信息草稿（JSON）；宽松重审下旧信息照常营业，通过后才生效
 
@@ -489,8 +495,9 @@ docker compose -f docker-compose.yml -f docker-compose.business.yml up -d
 - `id`、`order_sn`（唯一）、`buyer_id`、`shop_id`、`total_amount`、`pay_status`、`order_status`、`create_time`
 - 退款：`refund_status`（0 无 / 1 待审核 / 2 已通过 / 3 已拒绝）、`refund_reason`、`refund_reject_reason`、
   `refund_apply_time`（**申请时间**，超时自动同意的计时锚点）、`refund_time`（**处理时间**）。两者语义不同，别混用
-- 发货：`delivery_mode`（1 快递 / 2 无需物流；NULL = 尚未发货）、`shipping_company`、`tracking_no`、`ship_time`
-- 收货（**下单快照**）：`address_id`（仅留痕）、`receiver_name`、`receiver_phone`、`receiver_region`（省市区）、`receiver_detail`
+- 履约：`delivery_mode`（**下单时确定**：1 快递 / 2 到店自提；NULL = v0.40 之前的存量订单）、`shipping_company`、`tracking_no`、`ship_time`
+- 收货（**下单快照**，仅快递）：`address_id`（仅留痕）、`receiver_name`、`receiver_phone`、`receiver_region`（省市区）、`receiver_detail`
+- 自提（**下单快照**，仅自提）：`pickup_shop_name`、`pickup_address`、`pickup_phone`
 - 幂等：`uk_idempotency_buyer(idempotency_key, buyer_id)`
 - `order_status`：0 待支付 / 1 已支付 / 2 已发货 / 3 已完成 / 4 已取消 / 5 已退款
 
@@ -595,11 +602,12 @@ Zipkin 的数据**落 Elasticsearch**（`zipkin-span-YYYY-MM-DD` 索引），容
 
 | 方法 | 路径 | 说明 | 权限 |
 | --- | --- | --- | --- |
-| POST | `/api/shop/application` | 提交入驻申请（**必须附商品清单**）；审核中/营业中禁再申请，被拒后可复用重来 | 用户 |
+| POST | `/api/shop/application` | 提交入驻申请（**必须附商品清单 + 门店地址/电话**）；审核中/营业中禁再申请，被拒后可复用重来 | 用户 |
 | GET | `/api/shop/application/my` | 我的申请状态 | 用户 |
 | GET | `/api/shop/my` | 我的店铺 | 用户 |
 | PUT | `/api/shop/my` | 更新店铺信息 → 宽松重审 | 用户 |
-| GET | `/api/shop/storefront/{shopId}` | 店铺主页（店铺信息 + 店主公开信息 + 在售商品） | 公开 |
+| GET | `/api/shop/storefront/{shopId}` | 店铺主页（店铺信息 + 履约标签/自提点 + 店主公开信息 + 在售商品） | 公开 |
+| GET | `/api/shop/{shopId}/fulfillment` | 店铺履约能力（能否快递、自提地址与门店电话），结算页用 | 公开 |
 | GET | `/api/shop/list` | 营业中店铺列表 | 公开 |
 | POST | `/api/shop/upload/image` | 图片上传（拖拽多图/店铺 logo/头像统一入口，本地磁盘，每用户 1 分钟限 20 张） | 用户 |
 | GET | `/api/admin/shop/applications` | 入驻申请列表（可按状态过滤） | 管理员 |
@@ -642,7 +650,7 @@ Zipkin 的数据**落 Elasticsearch**（`zipkin-span-YYYY-MM-DD` 索引），容
 | GET | `/api/cart` | 购物车列表 |
 | PUT | `/api/cart/{id}` | 更新购物车条目（数量/勾选） |
 | DELETE | `/api/cart/{id}` | 删除购物车条目 |
-| POST | `/api/order` | 下单（Seata：建单 + 锁库存），返回订单号；支持 `Idempotency-Key`；`addressId` 可选（不传取默认地址，无地址则拒绝下单） |
+| POST | `/api/order` | 下单（Seata：建单 + 锁库存），返回订单号；支持 `Idempotency-Key`。`deliveryMode`：1 快递 / 2 到店自提（**不传默认自提**）；快递需 `addressId`（不传取默认地址）且店铺须支持快递；自提无需地址 |
 | GET | `/api/order/addresses` | 收货地址列表（默认地址排最前） |
 | POST | `/api/order/addresses` | 新增收货地址（首个地址自动设为默认，单用户上限 20 条） |
 | PUT | `/api/order/addresses/{id}` | 修改收货地址（仅本人才可改） |
@@ -650,7 +658,7 @@ Zipkin 的数据**落 Elasticsearch**（`zipkin-span-YYYY-MM-DD` 索引），容
 | PUT | `/api/order/addresses/{id}/default` | 设为默认地址 |
 | POST | `/api/order/{orderSn}/pay` | 模拟支付（触发异步扣库存） |
 | POST | `/api/order/{orderSn}/cancel` | 取消订单（解锁库存） |
-| POST | `/api/order/{orderSn}/ship` | 卖家发货（**需请求体**：`deliveryMode` 1 快递/2 无需物流；选快递时另需 `shippingCompany` + `trackingNo`，选无需物流时两者必须为空） |
+| POST | `/api/order/{orderSn}/ship` | 卖家发货：快递订单填 `shippingCompany` + `trackingNo`；自提订单什么都不填（表示「备货完成，可来取货」）。`deliveryMode` 仅对存量订单生效，传了必须与订单一致 |
 | POST | `/api/order/{orderSn}/confirm` | 买家确认收货 |
 | POST | `/api/order/{orderSn}/refund` | 买家申请退款 |
 | POST | `/api/order/{orderSn}/refund/review` | 卖家审核退款（通过 = 订单置「已退款」+ 库存回补 + 销量回退；拒绝需填原因） |
